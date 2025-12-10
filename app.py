@@ -1,6 +1,7 @@
 import streamlit as st
 import uuid
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps # [新增] ImageOps 用于修复微信图片旋转
+import os # [新增] 用于文件操作
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 import io
 import zipfile
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -28,7 +29,6 @@ if 'y_cuts' not in st.session_state: st.session_state['y_cuts'] = []
 
 # [状态管理] 自由框选专用
 if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = False
-if 'locked_image' not in st.session_state: st.session_state['locked_image'] = None
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 
@@ -40,12 +40,9 @@ def convert_image_to_bytes(img, fmt='PNG'):
     else: img.save(buf, format=fmt)
     return buf.getvalue()
 
-# [新增] 深度清洗图片：修复EXIF旋转、强制RGB、去除杂质
 def clean_image(img_file):
     image = Image.open(img_file)
-    # 1. 修复手机/微信拍照的旋转问题
     image = ImageOps.exif_transpose(image)
-    # 2. 强制转为 RGB (去除 Alpha 通道，防止兼容性问题)
     if image.mode != "RGB":
         image = image.convert("RGB")
     return image
@@ -97,7 +94,6 @@ with tab1:
         cols = st.columns(5)
         for i, f in enumerate(files):
             with cols[i%5]:
-                # 使用 clean_image 修复可能的显示问题
                 st.image(clean_image(f), use_container_width=True)
                 sort_data.append({"f": f, "r": st.number_input(f"No.", 1, value=i+1, key=f"s_{i}", label_visibility="collapsed")})
         sorted_files = [x["f"] for x in sorted(sort_data, key=lambda x: x["r"])]
@@ -118,7 +114,7 @@ with tab2:
     st.header("参考线贯穿切割 (Guillotine)")
     f = st.file_uploader("上传图片", type=['png','jpg','jpeg'], key="sl_up")
     if f:
-        img = clean_image(f) # 修复
+        img = clean_image(f)
         if 'current_img' not in st.session_state or st.session_state.current_img != f.name:
             st.session_state.x_cuts, st.session_state.y_cuts = [], []
             st.session_state.current_img = f.name
@@ -154,7 +150,7 @@ with tab3:
     st.header("高清修复")
     f = st.file_uploader("上传图片", type=['png','jpg'], key="re_up")
     if f:
-        img = clean_image(f) # 修复
+        img = clean_image(f)
         with st.expander("参数"):
             up, sh, co = st.checkbox("2倍放大", True), st.slider("锐化",0.0,5.0,2.0), st.slider("对比",0.5,2.0,1.2)
         if st.button("🚀 修复", type="primary"):
@@ -166,7 +162,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (微信图片终极修复版) ---
+# --- Tab 4: 自由框选切割 (落地为安版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     
@@ -175,12 +171,10 @@ with tab4:
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
-        st.session_state['locked_image'] = None
         st.session_state['locked_scale'] = 1.0
         st.session_state['canvas_key'] = str(uuid.uuid4())
 
     if crop_file:
-        # [核心] 使用 clean_image 彻底清洗图片，修复旋转和格式问题
         original_img = clean_image(crop_file)
         w, h = original_img.size
         
@@ -201,9 +195,13 @@ with tab4:
             st.write("---")
             if st.button("🔒 大小合适了，锁定并开始画框", type="primary"):
                 st.session_state['canvas_locked'] = True
-                st.session_state['locked_image'] = preview_img
                 st.session_state['locked_scale'] = scale_factor
                 st.session_state['canvas_key'] = str(uuid.uuid4())
+                
+                # [核心修改] 将图片保存到服务器硬盘的临时文件
+                # 这样 st_canvas 就不是从内存读，而是从硬盘读，绝对稳定
+                preview_img.save("temp_canvas_bg.png", format="PNG")
+                
                 st.rerun()
 
         # === 阶段 2: 画图阶段 ===
@@ -216,17 +214,22 @@ with tab4:
                     st.session_state['canvas_locked'] = False
                     st.rerun()
 
-                locked_img = st.session_state['locked_image']
+                # [核心修改] 从硬盘读取刚才保存的临时文件
+                # 必须重新 open，确保 file handle 是全新的
+                if os.path.exists("temp_canvas_bg.png"):
+                    bg_img_from_disk = Image.open("temp_canvas_bg.png")
+                else:
+                    st.error("缓存文件丢失，请重新解锁并锁定。")
+                    st.stop()
                 
-                # [关键点] 传递清洗后的 PIL 对象，配合 key 强制刷新
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=locked_img, 
+                    background_image=bg_img_from_disk, # 传入硬盘上的图片
                     update_streamlit=True,
-                    height=locked_img.height,
-                    width=locked_img.width,
+                    height=bg_img_from_disk.height,
+                    width=bg_img_from_disk.width,
                     drawing_mode="rect",
                     key=f"canvas_{st.session_state['canvas_key']}", 
                     display_toolbar=True
