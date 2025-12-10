@@ -38,7 +38,10 @@ if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = 
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] = None
-if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] # 存储画好的框
+if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] 
+# [关键新增] 冻结的画布状态，防止死循环
+if 'frozen_drawing' not in st.session_state: st.session_state['frozen_drawing'] = None
+if 'last_draw_mode' not in st.session_state: st.session_state['last_draw_mode'] = "✏️ 画框模式"
 
 # === 工具函数 ===
 
@@ -55,7 +58,8 @@ def image_to_base64(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
-def clean_image(uploaded_file):
+@st.cache_data(show_spinner=False)
+def process_uploaded_image(uploaded_file):
     try:
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
@@ -72,11 +76,11 @@ def clean_image(uploaded_file):
         else:
             new_img.paste(img)
         return new_img
-    except Exception as e:
-        err_img = Image.new('RGB', (200, 50), (255, 200, 200))
-        draw = ImageDraw.Draw(err_img)
-        draw.text((10, 10), "Error", fill="red")
-        return err_img
+    except Exception:
+        return Image.new('RGB', (200, 50), (255, 200, 200))
+
+def clean_image(uploaded_file):
+    return process_uploaded_image(uploaded_file)
 
 def enhance_image(image, upscale_factor=2.0, sharpness=2.0, contrast=1.1, color=1.1):
     if upscale_factor > 1.0:
@@ -347,7 +351,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (双模式+撤销) ---
+# --- Tab 4: 自由框选切割 (防抖动终极版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
@@ -359,7 +363,8 @@ with tab4:
         st.session_state['locked_scale'] = 1.0
         st.session_state['canvas_key'] = str(uuid.uuid4())
         st.session_state['canvas_bg_json'] = None
-        st.session_state['saved_rects'] = [] # 重置已画框框
+        st.session_state['saved_rects'] = [] 
+        st.session_state['frozen_drawing'] = None
 
     if crop_file:
         original_img = clean_image(crop_file)
@@ -374,8 +379,6 @@ with tab4:
             display_h = int(h * scale_factor)
             
             preview_img = original_img.resize((display_w, display_h))
-            
-            # [核心修复] 强制指定 width，确保视觉上图片会变小，而不是被列宽自动填充
             st.image(preview_img, width=display_w, caption=f"预览效果 ({display_w} x {display_h})")
             
             st.write("---")
@@ -402,24 +405,37 @@ with tab4:
                     ]
                 }
                 st.session_state['canvas_bg_json'] = bg_json
+                # [核心] 初始化冻结的输入状态
+                st.session_state['frozen_drawing'] = bg_json
                 st.rerun()
 
         else:
-            # === 第二步：画布操作区域 ===
             c_tools, c_canvas = st.columns([1, 3])
             
             with c_tools:
                 st.success("✅ 画板已就绪")
-                
-                # [新增] 模式切换
                 draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
                 
+                # [核心] 监听模式切换，模式切换时强制更新输入
+                if draw_mode != st.session_state.get('last_draw_mode'):
+                    st.session_state['last_draw_mode'] = draw_mode
+                    # 切换模式时，将当前已画的框同步进 input，并刷新key
+                    st.session_state['frozen_drawing'] = {
+                        "version": "4.4.0",
+                        "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
+                    }
+                    st.session_state['canvas_key'] = str(uuid.uuid4())
+                    st.rerun()
+
                 st.write("---")
-                # [新增] 撤销与清空
                 if st.button("↩️ 撤销上一步", use_container_width=True):
                     if st.session_state['saved_rects']:
                         st.session_state['saved_rects'].pop()
-                        # 强制刷新 Key，让画布重绘
+                        # 撤销时，更新输入，刷新key
+                        st.session_state['frozen_drawing'] = {
+                            "version": "4.4.0",
+                            "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
+                        }
                         st.session_state['canvas_key'] = str(uuid.uuid4()) 
                         st.rerun()
                     else:
@@ -427,6 +443,8 @@ with tab4:
 
                 if st.button("🗑️ 清空所有框", use_container_width=True):
                     st.session_state['saved_rects'] = []
+                    # 清空时，输入重置为纯背景
+                    st.session_state['frozen_drawing'] = st.session_state['canvas_bg_json']
                     st.session_state['canvas_key'] = str(uuid.uuid4())
                     st.rerun()
 
@@ -443,14 +461,6 @@ with tab4:
                 bg_w = st.session_state['canvas_bg_json']['objects'][0]['width']
                 bg_h = st.session_state['canvas_bg_json']['objects'][0]['height']
 
-                # 动态构建 initial_drawing: 背景图 + 已保存的框
-                # 这样切换模式或撤销时，框框不会丢失
-                current_drawing = {
-                    "version": "4.4.0",
-                    "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
-                }
-
-                # 根据模式设定 canvas 参数
                 real_mode = "rect" if "画框" in draw_mode else "transform"
 
                 canvas_result = st_canvas(
@@ -458,27 +468,22 @@ with tab4:
                     stroke_color="#FF0000",
                     stroke_width=2,
                     background_image=None,
-                    initial_drawing=current_drawing, # 注入混合好的数据
+                    # [核心修复] 使用冻结的输入，除非点击按钮否则永远不更新这个参数
+                    initial_drawing=st.session_state['frozen_drawing'],
                     update_streamlit=True,
                     height=bg_h,
                     width=bg_w,
-                    drawing_mode=real_mode, # 动态切换模式
+                    drawing_mode=real_mode,
                     key=f"canvas_{st.session_state['canvas_key']}",
                     display_toolbar=True
                 )
 
-                # [核心] 同步数据：每次操作后，把画布上的框存回 session_state
                 if canvas_result.json_data is not None:
-                    # 过滤掉背景图(image)，只保留框框(rect)
+                    # 只读取，不反向写入 initial_drawing
                     current_objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
-                    
-                    # 只有当数量或内容发生变化时才更新 session，防止死循环
                     if current_objects != st.session_state['saved_rects']:
                         st.session_state['saved_rects'] = current_objects
-                        # 注意：这里不 st.rerun()，否则会打断用户的连续绘画
-                        # 只有点按钮(撤销/切换模式)导致Key变化时才强制刷新
 
-            # 底部下载区
             st.divider()
             count = len(st.session_state['saved_rects'])
             st.write(f"当前已选中 **{count}** 个区域")
@@ -489,14 +494,11 @@ with tab4:
                     with zipfile.ZipFile(zip_buffer, "w") as zf:
                         scale = st.session_state['locked_scale']
                         for i, obj in enumerate(st.session_state['saved_rects']):
-                            # 坐标还原
                             real_x = int(obj["left"] / scale)
                             real_y = int(obj["top"] / scale)
-                            # 考虑 transform 模式下的缩放
                             real_w = int((obj["width"] * obj.get("scaleX", 1)) / scale)
                             real_h = int((obj["height"] * obj.get("scaleY", 1)) / scale)
                             
-                            # 边界检查
                             if real_w > 0 and real_h > 0:
                                 box = (real_x, real_y, real_x+real_w, real_y+real_h)
                                 try:
@@ -504,8 +506,7 @@ with tab4:
                                     img_byte = io.BytesIO()
                                     cropped.save(img_byte, format='PNG')
                                     zf.writestr(f"crop_{i+1}.png", img_byte.getvalue())
-                                except:
-                                    pass # 忽略无效切割
+                                except: pass
                                     
                     st.download_button("📦 下载ZIP", zip_buffer.getvalue(), "free_crops.zip", "application/zip")
 
