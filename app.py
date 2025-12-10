@@ -1,7 +1,7 @@
 import streamlit as st
 import uuid
 import os
-import math # [新增] 用于网格计算
+import math
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 import io
 import zipfile
@@ -42,9 +42,19 @@ def convert_image_to_bytes(img, fmt='PNG'):
     else: img.save(buf, format=fmt)
     return buf.getvalue()
 
+# [核心修复] 增强版图片清洗函数：防报错、防指针丢失
 def clean_image(img_file):
+    # 1. 关键：重置文件指针到开头，防止二次读取时为空
+    img_file.seek(0)
     image = Image.open(img_file)
-    image = ImageOps.exif_transpose(image)
+    
+    # 2. 关键：尝试修复旋转，如果元数据损坏则跳过，防止 TypeError
+    try:
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        pass # 如果EXIF数据坏了，就保持原样，不要崩
+
+    # 3. 统一转为 RGB
     if image.mode != "RGB":
         image = image.convert("RGB")
     return image
@@ -65,11 +75,9 @@ def slice_image_by_guides(img, xs, ys):
     ys = sorted(list(set([0] + ys + [img.height])))
     return [img.crop((xs[i], ys[j], xs[i+1], ys[j+1])) for j in range(len(ys)-1) for i in range(len(xs)-1) if xs[i+1]>xs[i] and ys[j+1]>ys[j]]
 
-# [重写] 增强版拼接函数，支持网格
 def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, padding=0, bg_color='#FFFFFF'):
     if not images: return None
     
-    # 将Hex颜色转为RGB
     bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
 
     if mode == 'vertical':
@@ -87,7 +95,6 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
         
         y_offset = 0
         for img in processed_imgs:
-            # 居中放置 (如果用户选了不缩放，居中会比较好看)
             x_center = (max_width - img.width) // 2
             result.paste(img, (x_center, y_offset))
             y_offset += img.height + padding
@@ -111,8 +118,7 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
             result.paste(img, (x_offset, y_center))
             x_offset += img.width + padding
 
-    else: # === [新增] 网格/自由拼接模式 ===
-        # 1. 先统一所有图片的宽度 (以最宽的为准，保证清晰度)
+    else: # Grid Mode
         target_width = max(img.width for img in images)
         resized_imgs = []
         for img in images:
@@ -121,36 +127,25 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
             img = img.resize((target_width, new_h), Image.Resampling.LANCZOS)
             resized_imgs.append(img)
             
-        # 2. 计算行数
         num_images = len(resized_imgs)
         rows = math.ceil(num_images / cols)
         
-        # 3. 计算每一行的高度 (该行中最高的图片决定行高)
         row_heights = []
         for r in range(rows):
-            # 获取这一行的图片
             row_imgs = resized_imgs[r*cols : (r+1)*cols]
-            # 这一行的高度 = 其中最高那张图的高度
             max_h_in_row = max(img.height for img in row_imgs)
             row_heights.append(max_h_in_row)
             
-        # 4. 计算总画布大小
         total_w = cols * target_width + (cols - 1) * padding
         total_h = sum(row_heights) + (rows - 1) * padding
         
         result = Image.new('RGB', (total_w, total_h), bg_color_rgb)
         
-        # 5. 开始粘贴
         for i, img in enumerate(resized_imgs):
-            r = i // cols # 当前在第几行
-            c = i % cols  # 当前在第几列
-            
-            # 计算X坐标
+            r = i // cols
+            c = i % cols
             x = c * (target_width + padding)
-            
-            # 计算Y坐标 (累加之前所有行的高度 + 间距)
             y = sum(row_heights[:r]) + r * padding
-            
             result.paste(img, (x, y))
             
     return result
@@ -160,7 +155,7 @@ st.title("🛠️ 全能图片工具箱 Pro Max")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🧩 智能拼图 (新功能)", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割"])
 
-# --- Tab 1: 拼图 (升级版) ---
+# --- Tab 1: 拼图 ---
 with tab1:
     st.header("图片拼接")
     files = st.file_uploader("上传图片", type=['png','jpg','jpeg','webp'], accept_multiple_files=True, key="stitch_up")
@@ -171,38 +166,33 @@ with tab1:
         cols_ui = st.columns(5)
         for i, f in enumerate(files):
             with cols_ui[i%5]:
+                # 调用修复后的 clean_image
                 st.image(clean_image(f), use_container_width=True)
                 sort_data.append({"f": f, "r": st.number_input(f"No.", 1, value=i+1, key=f"s_{i}", label_visibility="collapsed")})
         sorted_files = [x["f"] for x in sorted(sort_data, key=lambda x: x["r"])]
         
         st.divider()
         
-        # === 参数控制区 ===
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            # 模式选择
             stitch_mode = st.radio("拼接模式", ['vertical', 'horizontal', 'grid'], 
                                    format_func=lambda x: "⬇️ 竖向长图" if x=='vertical' else ("➡️ 横向长条" if x=='horizontal' else "田 网格/自由拼接"))
         
         with c2:
-            # 只有在非网格模式下才显示对齐
             if stitch_mode != 'grid':
                 align_mode = st.radio("对齐方式", ['max', 'original'], 
                                       format_func=lambda x: "📏 自动拉伸对齐" if x=='max' else "🔳 保持原图尺寸")
             else:
-                # 网格模式显示列数选择
                 grid_cols = st.number_input("列数 (一行放几张)", min_value=1, max_value=10, value=2)
-                align_mode = 'max' # 网格模式默认强制对齐宽度
+                align_mode = 'max'
 
         with c3:
-            # 通用参数：间距和颜色
             padding = st.slider("图片间距 (Padding)", 0, 100, 0)
             bg_color = st.color_picker("背景/间距颜色", "#FFFFFF")
 
         if st.button("✨ 开始拼接", type="primary", use_container_width=True):
-            # 只有在网格模式下才传 cols
             cols_param = grid_cols if stitch_mode == 'grid' else 1
-            
+            # 在拼接时也调用 clean_image 确保安全
             st.session_state['stitched_result'] = stitch_images_advanced(
                 [clean_image(f) for f in sorted_files], 
                 mode=stitch_mode, 
@@ -215,7 +205,6 @@ with tab1:
     if st.session_state['stitched_result']:
         res = st.session_state['stitched_result']
         st.success(f"拼接完成！尺寸: {res.width} x {res.height}")
-        
         z = st.slider("预览缩放", 10, 100, 50, key="st_zoom")
         st.download_button("📥 下载拼接大图", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary", use_container_width=True)
         st.image(res.resize((int(res.width*z/100), int(res.height*z/100))) if z<100 else res)
