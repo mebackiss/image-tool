@@ -1,5 +1,6 @@
 streamlit==1.39.0
 pillow
+numpy
 streamlit-image-coordinates
 streamlit-image-comparison
 streamlit-drawable-canvas
