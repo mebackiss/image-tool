@@ -1,0 +1,12 @@
+[server]
+maxUploadSize = 2000
+enableCORS = false
+enableXsrfProtection = false
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+# 【关键】关闭快速重绘，防止画框时云端处理不过来导致崩溃
+fastReruns = false
