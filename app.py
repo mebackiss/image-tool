@@ -42,22 +42,48 @@ def convert_image_to_bytes(img, fmt='PNG'):
     else: img.save(buf, format=fmt)
     return buf.getvalue()
 
-# [核心修复] 增强版图片清洗函数：防报错、防指针丢失
-def clean_image(img_file):
-    # 1. 关键：重置文件指针到开头，防止二次读取时为空
-    img_file.seek(0)
-    image = Image.open(img_file)
-    
-    # 2. 关键：尝试修复旋转，如果元数据损坏则跳过，防止 TypeError
+# [核心修复] 防崩溃图片清洗函数 (针对微信/手机坏图)
+def clean_image(uploaded_file):
     try:
-        image = ImageOps.exif_transpose(image)
-    except Exception:
-        pass # 如果EXIF数据坏了，就保持原样，不要崩
-
-    # 3. 统一转为 RGB
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    return image
+        # 1. 彻底的数据隔离：将文件内容完全读入内存
+        uploaded_file.seek(0)
+        file_bytes = uploaded_file.read()
+        
+        # 2. 从内存字节创建图片
+        img = Image.open(io.BytesIO(file_bytes))
+        
+        # 3. 强制加载像素数据 (解决 lazy loading 问题)
+        img.load()
+        
+        # 4. 尝试修复旋转 (微信图片常见问题)
+        # 使用 try-except 包裹，如果 EXIF 数据损坏，直接跳过旋转修复
+        try:
+            if hasattr(img, '_getexif'): # 检查是否有 EXIF
+                img = ImageOps.exif_transpose(img)
+        except Exception:
+            # 如果旋转算法崩溃，说明 EXIF 坏了，我们直接用原图，不转了
+            pass 
+        
+        # 5. 强制新建一张纯 RGB 图片 (相当于重绘)
+        # 这一步能丢弃所有损坏的元数据、CMYK 模式、Alpha 通道问题
+        new_img = Image.new("RGB", img.size, (255, 255, 255))
+        
+        # 处理带透明度的图片 (PNG)
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            # 如果原图有透明，粘贴时需要 mask
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            new_img.paste(img, mask=img.split()[3]) # 使用 Alpha 通道作为掩码
+        else:
+            # 普通 JPG 直接贴
+            new_img.paste(img)
+            
+        return new_img
+        
+    except Exception as e:
+        # 万一图片彻底坏了，返回一张红色的错误提示图，防止程序崩溃
+        st.error(f"图片 {uploaded_file.name} 损坏，无法读取: {e}")
+        return Image.new('RGB', (100, 100), (255, 0, 0))
 
 def enhance_image(image, upscale_factor=2.0, sharpness=2.0, contrast=1.1, color=1.1):
     if upscale_factor > 1.0:
@@ -166,8 +192,9 @@ with tab1:
         cols_ui = st.columns(5)
         for i, f in enumerate(files):
             with cols_ui[i%5]:
-                # 调用修复后的 clean_image
-                st.image(clean_image(f), use_container_width=True)
+                # 调用防崩溃版 clean_image
+                img_safe = clean_image(f)
+                st.image(img_safe, use_container_width=True)
                 sort_data.append({"f": f, "r": st.number_input(f"No.", 1, value=i+1, key=f"s_{i}", label_visibility="collapsed")})
         sorted_files = [x["f"] for x in sorted(sort_data, key=lambda x: x["r"])]
         
@@ -192,7 +219,6 @@ with tab1:
 
         if st.button("✨ 开始拼接", type="primary", use_container_width=True):
             cols_param = grid_cols if stitch_mode == 'grid' else 1
-            # 在拼接时也调用 clean_image 确保安全
             st.session_state['stitched_result'] = stitch_images_advanced(
                 [clean_image(f) for f in sorted_files], 
                 mode=stitch_mode, 
