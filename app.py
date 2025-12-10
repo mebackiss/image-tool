@@ -148,7 +148,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (强力修复版) ---
+# --- Tab 4: 自由框选切割 (终极修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     st.caption("先调整下方滑块缩小图片，然后在图片上拖拽画框。")
@@ -156,11 +156,12 @@ with tab4:
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
     if crop_file:
+        # 1. 强制转 RGB (防止 RGBA 或 CMYK 导致的显示兼容性问题)
         original_img = Image.open(crop_file).convert("RGB")
         w, h = original_img.size
         st.write(f"原图尺寸: {w} x {h}")
         
-        # 默认缩放
+        # 2. 缩放逻辑
         default_zoom = 50 if w > 1000 else 100
         canvas_zoom = st.slider("🔍 画布缩放 (%)", 10, 100, default_zoom, key="canvas_zoom")
         
@@ -168,35 +169,27 @@ with tab4:
         display_w = int(w * scale_factor)
         display_h = int(h * scale_factor)
         
-        # === 核心修复 1: 内存清洗 ===
-        # 将缩放后的图片先保存到 BytesIO，再重新打开
-        # 这能解决云端服务器上 PIL 图片对象传给前端失败的问题
-        resized_temp = original_img.resize((display_w, display_h))
-        buf = io.BytesIO()
-        resized_temp.save(buf, format="PNG")
-        buf.seek(0)
-        display_img_sanitized = Image.open(buf)
+        # === 核心修复点 ===
+        # 不再使用 BytesIO，直接 resize，并使用 .copy() 确保像素数据在内存中是“热”的
+        # 这样 st_canvas 就能读到数据了
+        display_img = original_img.resize((display_w, display_h)).copy()
 
         col_c1, col_c2 = st.columns([3, 1])
         
         with col_c1:
-            st.write("👇 **请在下方直接拖拽画框：**")
+            st.write("👇 **在下方直接拖拽画框：**")
             
-            # === 核心修复 2: 动态 Key ===
-            # key=f"canvas_{canvas_zoom}" 
-            # 意思是：一旦你拖动滑块，Key 就会变，Streamlit 就会彻底销毁旧画布，
-            # 重新渲染新画布，确保图片一定能加载出来，不会留白。
-            
+            # 使用动态 Key 确保每次缩放都彻底重绘组件
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_color="#FF0000",
                 stroke_width=2,
-                background_image=display_img_sanitized, # 使用“清洗”过的图片
+                background_image=display_img, # 直接传入 copy 后的对象
                 update_streamlit=True,
-                height=display_h,
-                width=display_w,
+                height=display_h, # 严格匹配高度
+                width=display_w,  # 严格匹配宽度
                 drawing_mode="rect",
-                key=f"canvas_{canvas_zoom}_{crop_file.name}", # 动态Key保证刷新
+                key=f"canvas_{canvas_zoom}_{crop_file.name}", 
                 display_toolbar=True
             )
 
