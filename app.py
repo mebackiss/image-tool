@@ -1,4 +1,5 @@
 import streamlit as st
+import base64 # [新增] 用于把图片转成字符串
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 import io
 import zipfile
@@ -19,22 +20,31 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# === Session State 初始化 ===
+# === Session State ===
 for key in ['x_cuts', 'y_cuts', 'last_click', 'stitched_result', 'restored_image', 'original_for_restore']:
     if key not in st.session_state: st.session_state[key] = None if 'list' not in str(type(st.session_state.get(key))) else []
 if 'x_cuts' not in st.session_state: st.session_state['x_cuts'] = []
 if 'y_cuts' not in st.session_state: st.session_state['y_cuts'] = []
-# [新增] 用于锁定画板的状态
+
+# [状态管理] 自由框选专用
 if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = False
 if 'locked_image' not in st.session_state: st.session_state['locked_image'] = None
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
 
 # === 工具函数 ===
+
 def convert_image_to_bytes(img, fmt='PNG'):
     buf = io.BytesIO()
     if fmt.upper() in ['JPEG', 'JPG']: img.save(buf, format=fmt, quality=100, subsampling=0)
     else: img.save(buf, format=fmt)
     return buf.getvalue()
+
+# [新增] 终极修复：将图片转为 Base64 字符串
+def image_to_base64(img):
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_str}"
 
 def enhance_image(image, upscale_factor=2.0, sharpness=2.0, contrast=1.1, color=1.1):
     if upscale_factor > 1.0:
@@ -151,13 +161,13 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (分步稳定版) ---
+# --- Tab 4: 自由框选切割 (Base64 终极修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
-    # 状态重置：如果用户换了图片，则取消锁定，回到第一步
+    # 状态重置
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
@@ -172,11 +182,9 @@ with tab4:
         if not st.session_state['canvas_locked']:
             st.info("👇 **第一步：请先拖动滑块，调整到你能看清全图的大小**")
             
-            # 默认缩放
             default_zoom = 50 if w > 1000 else 100
             canvas_zoom = st.slider("🔍 图片缩放 (%)", 10, 100, default_zoom, key="preview_zoom")
             
-            # 实时显示预览图 (使用最稳定的 st.image)
             scale_factor = canvas_zoom / 100.0
             display_w = int(w * scale_factor)
             display_h = int(h * scale_factor)
@@ -185,11 +193,10 @@ with tab4:
             st.image(preview_img, caption=f"预览效果 ({display_w} x {display_h})")
             
             st.write("---")
-            # 确认按钮
             if st.button("🔒 大小合适了，锁定并开始画框", type="primary"):
                 st.session_state['canvas_locked'] = True
-                st.session_state['locked_image'] = preview_img  # 保存这张缩略图
-                st.session_state['locked_scale'] = scale_factor # 保存缩放比例
+                st.session_state['locked_image'] = preview_img  # 保存PIL对象
+                st.session_state['locked_scale'] = scale_factor
                 st.rerun()
 
         # === 阶段 2: 画图阶段 ===
@@ -202,20 +209,22 @@ with tab4:
                     st.session_state['canvas_locked'] = False
                     st.rerun()
 
-                # 取出锁定的图片
                 locked_img = st.session_state['locked_image']
                 
-                # 加载 Canvas
+                # [核心修改] 将图片转为 Base64 字符串
+                # 这样传给 canvas 就是一段纯文本数据，绝对不会丢失！
+                bg_image_base64 = image_to_base64(locked_img)
+                
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=locked_img, # 这里的图片是锁定的，不会变
+                    background_image=bg_image_base64, # 传入 Base64 字符串
                     update_streamlit=True,
                     height=locked_img.height,
                     width=locked_img.width,
                     drawing_mode="rect",
-                    key="canvas_fixed",
+                    key="canvas_fixed_base64", # key变一下，强制刷新
                     display_toolbar=True
                 )
 
