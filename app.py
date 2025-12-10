@@ -1,5 +1,5 @@
 import streamlit as st
-import base64 # [新增] 用于把图片转成字符串
+import uuid # [新增] 用于生成随机ID，强制刷新组件
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 import io
 import zipfile
@@ -20,7 +20,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# === Session State ===
+# === Session State 初始化 ===
 for key in ['x_cuts', 'y_cuts', 'last_click', 'stitched_result', 'restored_image', 'original_for_restore']:
     if key not in st.session_state: st.session_state[key] = None if 'list' not in str(type(st.session_state.get(key))) else []
 if 'x_cuts' not in st.session_state: st.session_state['x_cuts'] = []
@@ -30,21 +30,14 @@ if 'y_cuts' not in st.session_state: st.session_state['y_cuts'] = []
 if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = False
 if 'locked_image' not in st.session_state: st.session_state['locked_image'] = None
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
+if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init" # [新增] 强制刷新的Key
 
 # === 工具函数 ===
-
 def convert_image_to_bytes(img, fmt='PNG'):
     buf = io.BytesIO()
     if fmt.upper() in ['JPEG', 'JPG']: img.save(buf, format=fmt, quality=100, subsampling=0)
     else: img.save(buf, format=fmt)
     return buf.getvalue()
-
-# [新增] 终极修复：将图片转为 Base64 字符串
-def image_to_base64(img):
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{img_str}"
 
 def enhance_image(image, upscale_factor=2.0, sharpness=2.0, contrast=1.1, color=1.1):
     if upscale_factor > 1.0:
@@ -161,7 +154,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (Base64 终极修复版) ---
+# --- Tab 4: 自由框选切割 (UUID 强制刷新修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     
@@ -173,6 +166,7 @@ with tab4:
         st.session_state['canvas_locked'] = False
         st.session_state['locked_image'] = None
         st.session_state['locked_scale'] = 1.0
+        st.session_state['canvas_key'] = str(uuid.uuid4()) # 重置Key
 
     if crop_file:
         original_img = Image.open(crop_file).convert("RGB")
@@ -189,14 +183,17 @@ with tab4:
             display_w = int(w * scale_factor)
             display_h = int(h * scale_factor)
             
+            # 使用最稳定的 st.image 进行预览
             preview_img = original_img.resize((display_w, display_h))
             st.image(preview_img, caption=f"预览效果 ({display_w} x {display_h})")
             
             st.write("---")
             if st.button("🔒 大小合适了，锁定并开始画框", type="primary"):
                 st.session_state['canvas_locked'] = True
-                st.session_state['locked_image'] = preview_img  # 保存PIL对象
+                st.session_state['locked_image'] = preview_img
                 st.session_state['locked_scale'] = scale_factor
+                # [核心修复] 生成一个新的随机Key，强制 st_canvas 重新加载，防止缓存白屏
+                st.session_state['canvas_key'] = str(uuid.uuid4())
                 st.rerun()
 
         # === 阶段 2: 画图阶段 ===
@@ -211,20 +208,18 @@ with tab4:
 
                 locked_img = st.session_state['locked_image']
                 
-                # [核心修改] 将图片转为 Base64 字符串
-                # 这样传给 canvas 就是一段纯文本数据，绝对不会丢失！
-                bg_image_base64 = image_to_base64(locked_img)
-                
+                # 这里传回 PIL 对象，配合 key 强制刷新
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=bg_image_base64, # 传入 Base64 字符串
+                    background_image=locked_img, # 传图片对象
                     update_streamlit=True,
                     height=locked_img.height,
                     width=locked_img.width,
                     drawing_mode="rect",
-                    key="canvas_fixed_base64", # key变一下，强制刷新
+                    # [重点] 每次点击锁定时这个Key都会变，强制组件重绘
+                    key=f"canvas_{st.session_state['canvas_key']}", 
                     display_toolbar=True
                 )
 
