@@ -1,6 +1,6 @@
 import streamlit as st
 import uuid
-import os # [新增] 用于文件操作
+import os
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 import io
 import zipfile
@@ -21,11 +21,15 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# === Session State ===
+# === Session State 初始化 ===
 for key in ['x_cuts', 'y_cuts', 'last_click', 'stitched_result', 'restored_image', 'original_for_restore']:
     if key not in st.session_state: st.session_state[key] = None if 'list' not in str(type(st.session_state.get(key))) else []
+
 if 'x_cuts' not in st.session_state: st.session_state['x_cuts'] = []
 if 'y_cuts' not in st.session_state: st.session_state['y_cuts'] = []
+
+# [新增] 切割历史记录，用于撤销功能
+if 'cut_history' not in st.session_state: st.session_state['cut_history'] = []
 
 # [状态管理] 自由框选专用
 if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = False
@@ -109,7 +113,7 @@ with tab1:
         st.download_button("📥 下载大图", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary")
         st.image(res.resize((int(res.width*z/100), int(res.height*z/100))) if z<100 else res)
 
-# --- Tab 2: 参考线切图 ---
+# --- Tab 2: 参考线切图 (已增加撤销功能) ---
 with tab2:
     st.header("参考线贯穿切割 (Guillotine)")
     f = st.file_uploader("上传图片", type=['png','jpg','jpeg'], key="sl_up")
@@ -117,32 +121,71 @@ with tab2:
         img = clean_image(f)
         if 'current_img' not in st.session_state or st.session_state.current_img != f.name:
             st.session_state.x_cuts, st.session_state.y_cuts = [], []
+            st.session_state.cut_history = [] # 重置历史
             st.session_state.current_img = f.name
             
         c1, c2 = st.columns([1, 2])
         with c1:
             z = st.slider("缩放", 10, 100, 100, 10, key="sl_z") / 100.0
             mode = st.radio("模式", ["⬇️ 垂直线", "➡️ 水平线"])
-            st.caption(f"X: {sorted(st.session_state.x_cuts)}")
-            st.caption(f"Y: {sorted(st.session_state.y_cuts)}")
-            if st.button("🗑️ 清空"): st.session_state.x_cuts, st.session_state.y_cuts = [], []; st.rerun()
-            if st.button("✂️ 切割下载", type="primary"):
+            st.caption(f"X坐标: {sorted(st.session_state.x_cuts)}")
+            st.caption(f"Y坐标: {sorted(st.session_state.y_cuts)}")
+            
+            # === [新增] 操作按钮组 ===
+            b_col1, b_col2 = st.columns(2)
+            with b_col1:
+                if st.button("🗑️ 清空", use_container_width=True): 
+                    st.session_state.x_cuts, st.session_state.y_cuts = [], []
+                    st.session_state.cut_history = []
+                    st.rerun()
+            with b_col2:
+                # 撤销按钮
+                if st.button("↩️ 撤销", use_container_width=True):
+                    if st.session_state.cut_history:
+                        # 弹出最后一次操作
+                        last_type, last_val = st.session_state.cut_history.pop()
+                        # 从对应的列表中删除
+                        if last_type == 'x' and last_val in st.session_state.x_cuts:
+                            st.session_state.x_cuts.remove(last_val)
+                        elif last_type == 'y' and last_val in st.session_state.y_cuts:
+                            st.session_state.y_cuts.remove(last_val)
+                        st.rerun()
+                    else:
+                        st.toast("没有可以撤销的操作", icon="⚠️")
+
+            st.write("---")
+            if st.button("✂️ 切割下载", type="primary", use_container_width=True):
                 slices = slice_image_by_guides(img, st.session_state.x_cuts, st.session_state.y_cuts)
                 buf = io.BytesIO()
                 with zipfile.ZipFile(buf, "w") as zf:
                     for i, s in enumerate(slices):
                         b = io.BytesIO(); s.save(b, 'PNG'); zf.writestr(f"slice_{i+1}.png", b.getvalue())
-                st.download_button("📦 下载ZIP", buf.getvalue(), "slices.zip", "application/zip")
+                st.download_button("📦 下载ZIP", buf.getvalue(), "slices.zip", "application/zip", use_container_width=True)
+                
         with c2:
+            # 预览与交互
             prev = img.resize((int(img.width*z), int(img.height*z))) if z<1 else img.copy()
             draw = ImageDraw.Draw(prev)
             for x in st.session_state.x_cuts: draw.line([(x*z,0),(x*z,prev.height)], fill='red', width=3)
             for y in st.session_state.y_cuts: draw.line([(0,y*z),(prev.width,y*z)], fill='blue', width=3)
+            
             val = streamlit_image_coordinates(prev, key="sl_pad")
+            
+            # 点击事件处理
             if val and val != st.session_state.last_click:
                 st.session_state.last_click = val
-                if "垂直" in mode: st.session_state.x_cuts.append(int(val['x']/z))
-                else: st.session_state.y_cuts.append(int(val['y']/z))
+                rx, ry = int(val['x']/z), int(val['y']/z)
+                
+                if "垂直" in mode: 
+                    if rx not in st.session_state.x_cuts: 
+                        st.session_state.x_cuts.append(rx)
+                        # [新增] 记入历史
+                        st.session_state.cut_history.append(('x', rx))
+                else:
+                    if ry not in st.session_state.y_cuts: 
+                        st.session_state.y_cuts.append(ry)
+                        # [新增] 记入历史
+                        st.session_state.cut_history.append(('y', ry))
                 st.rerun()
 
 # --- Tab 3: 修复 ---
@@ -162,7 +205,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (落地为安版) ---
+# --- Tab 4: 自由框选切割 (保留代码但不作为重点) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     
@@ -197,11 +240,7 @@ with tab4:
                 st.session_state['canvas_locked'] = True
                 st.session_state['locked_scale'] = scale_factor
                 st.session_state['canvas_key'] = str(uuid.uuid4())
-                
-                # [核心修改] 将图片保存到服务器硬盘的临时文件
-                # 这样 st_canvas 就不是从内存读，而是从硬盘读，绝对稳定
                 preview_img.save("temp_canvas_bg.png", format="PNG")
-                
                 st.rerun()
 
         # === 阶段 2: 画图阶段 ===
@@ -214,19 +253,17 @@ with tab4:
                     st.session_state['canvas_locked'] = False
                     st.rerun()
 
-                # [核心修改] 从硬盘读取刚才保存的临时文件
-                # 必须重新 open，确保 file handle 是全新的
                 if os.path.exists("temp_canvas_bg.png"):
                     bg_img_from_disk = Image.open("temp_canvas_bg.png")
                 else:
-                    st.error("缓存文件丢失，请重新解锁并锁定。")
+                    st.error("缓存文件丢失，请重新解锁。")
                     st.stop()
                 
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=bg_img_from_disk, # 传入硬盘上的图片
+                    background_image=bg_img_from_disk,
                     update_streamlit=True,
                     height=bg_img_from_disk.height,
                     width=bg_img_from_disk.width,
@@ -237,7 +274,6 @@ with tab4:
 
             with col_c2:
                 st.info("💡 已就绪")
-                
                 if canvas_result.json_data is not None:
                     objects = canvas_result.json_data["objects"]
                     count = len(objects)
@@ -253,12 +289,10 @@ with tab4:
                                     real_y = int(obj["top"] / scale)
                                     real_w = int(obj["width"] / scale)
                                     real_h = int(obj["height"] / scale)
-                                    
                                     if real_w > 0 and real_h > 0:
                                         cropped = original_img.crop((real_x, real_y, real_x+real_w, real_y+real_h))
                                         img_byte = io.BytesIO()
                                         cropped.save(img_byte, format='PNG')
                                         zf.writestr(f"crop_{i+1}.png", img_byte.getvalue())
-                            
                             st.download_button("📦 下载ZIP", zip_buffer.getvalue(), "free_crops.zip", "application/zip")
                             st.success("完成！")
