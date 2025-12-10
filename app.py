@@ -42,48 +42,16 @@ def convert_image_to_bytes(img, fmt='PNG'):
     else: img.save(buf, format=fmt)
     return buf.getvalue()
 
-# [核心修复] 防崩溃图片清洗函数 (针对微信/手机坏图)
-def clean_image(uploaded_file):
+def clean_image(img_file):
+    img_file.seek(0)
+    image = Image.open(img_file)
     try:
-        # 1. 彻底的数据隔离：将文件内容完全读入内存
-        uploaded_file.seek(0)
-        file_bytes = uploaded_file.read()
-        
-        # 2. 从内存字节创建图片
-        img = Image.open(io.BytesIO(file_bytes))
-        
-        # 3. 强制加载像素数据 (解决 lazy loading 问题)
-        img.load()
-        
-        # 4. 尝试修复旋转 (微信图片常见问题)
-        # 使用 try-except 包裹，如果 EXIF 数据损坏，直接跳过旋转修复
-        try:
-            if hasattr(img, '_getexif'): # 检查是否有 EXIF
-                img = ImageOps.exif_transpose(img)
-        except Exception:
-            # 如果旋转算法崩溃，说明 EXIF 坏了，我们直接用原图，不转了
-            pass 
-        
-        # 5. 强制新建一张纯 RGB 图片 (相当于重绘)
-        # 这一步能丢弃所有损坏的元数据、CMYK 模式、Alpha 通道问题
-        new_img = Image.new("RGB", img.size, (255, 255, 255))
-        
-        # 处理带透明度的图片 (PNG)
-        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-            # 如果原图有透明，粘贴时需要 mask
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            new_img.paste(img, mask=img.split()[3]) # 使用 Alpha 通道作为掩码
-        else:
-            # 普通 JPG 直接贴
-            new_img.paste(img)
-            
-        return new_img
-        
-    except Exception as e:
-        # 万一图片彻底坏了，返回一张红色的错误提示图，防止程序崩溃
-        st.error(f"图片 {uploaded_file.name} 损坏，无法读取: {e}")
-        return Image.new('RGB', (100, 100), (255, 0, 0))
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        pass
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    return image
 
 def enhance_image(image, upscale_factor=2.0, sharpness=2.0, contrast=1.1, color=1.1):
     if upscale_factor > 1.0:
@@ -103,7 +71,6 @@ def slice_image_by_guides(img, xs, ys):
 
 def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, padding=0, bg_color='#FFFFFF'):
     if not images: return None
-    
     bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
 
     if mode == 'vertical':
@@ -115,10 +82,8 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
                 new_height = int(img.height * ratio)
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
             processed_imgs.append(img)
-            
         total_height = sum(img.height for img in processed_imgs) + (len(processed_imgs) - 1) * padding
         result = Image.new('RGB', (max_width, total_height), bg_color_rgb)
-        
         y_offset = 0
         for img in processed_imgs:
             x_center = (max_width - img.width) // 2
@@ -134,17 +99,15 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
                 new_width = int(img.width * ratio)
                 img = img.resize((new_width, max_height), Image.Resampling.LANCZOS)
             processed_imgs.append(img)
-            
         total_width = sum(img.width for img in processed_imgs) + (len(processed_imgs) - 1) * padding
         result = Image.new('RGB', (total_width, max_height), bg_color_rgb)
-        
         x_offset = 0
         for img in processed_imgs:
             y_center = (max_height - img.height) // 2
             result.paste(img, (x_offset, y_center))
             x_offset += img.width + padding
 
-    else: # Grid Mode
+    else: 
         target_width = max(img.width for img in images)
         resized_imgs = []
         for img in images:
@@ -152,21 +115,16 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
             new_h = int(img.height * ratio)
             img = img.resize((target_width, new_h), Image.Resampling.LANCZOS)
             resized_imgs.append(img)
-            
         num_images = len(resized_imgs)
         rows = math.ceil(num_images / cols)
-        
         row_heights = []
         for r in range(rows):
             row_imgs = resized_imgs[r*cols : (r+1)*cols]
             max_h_in_row = max(img.height for img in row_imgs)
             row_heights.append(max_h_in_row)
-            
         total_w = cols * target_width + (cols - 1) * padding
         total_h = sum(row_heights) + (rows - 1) * padding
-        
         result = Image.new('RGB', (total_w, total_h), bg_color_rgb)
-        
         for i, img in enumerate(resized_imgs):
             r = i // cols
             c = i % cols
@@ -179,63 +137,47 @@ def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, pad
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4 = st.tabs(["🧩 智能拼图 (新功能)", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割"])
+tab1, tab2, tab3, tab4 = st.tabs(["🧩 智能拼图", "🔪 参考线切图 (升级版)", "💎 高清修复", "🔳 自由框选切割"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
     st.header("图片拼接")
     files = st.file_uploader("上传图片", type=['png','jpg','jpeg','webp'], accept_multiple_files=True, key="stitch_up")
-    
     if files:
-        st.markdown("##### 🔢 调整顺序 (数字越小越靠前)")
+        st.markdown("##### 🔢 调整顺序")
         sort_data = []
         cols_ui = st.columns(5)
         for i, f in enumerate(files):
             with cols_ui[i%5]:
-                # 调用防崩溃版 clean_image
-                img_safe = clean_image(f)
-                st.image(img_safe, use_container_width=True)
+                st.image(clean_image(f), use_container_width=True)
                 sort_data.append({"f": f, "r": st.number_input(f"No.", 1, value=i+1, key=f"s_{i}", label_visibility="collapsed")})
         sorted_files = [x["f"] for x in sorted(sort_data, key=lambda x: x["r"])]
-        
         st.divider()
-        
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            stitch_mode = st.radio("拼接模式", ['vertical', 'horizontal', 'grid'], 
-                                   format_func=lambda x: "⬇️ 竖向长图" if x=='vertical' else ("➡️ 横向长条" if x=='horizontal' else "田 网格/自由拼接"))
-        
+            stitch_mode = st.radio("拼接模式", ['vertical', 'horizontal', 'grid'], format_func=lambda x: "⬇️ 竖向" if x=='vertical' else ("➡️ 横向" if x=='horizontal' else "田 网格"))
         with c2:
             if stitch_mode != 'grid':
-                align_mode = st.radio("对齐方式", ['max', 'original'], 
-                                      format_func=lambda x: "📏 自动拉伸对齐" if x=='max' else "🔳 保持原图尺寸")
+                align_mode = st.radio("对齐", ['max', 'original'], format_func=lambda x: "📏 自动对齐" if x=='max' else "🔳 保持原图")
             else:
-                grid_cols = st.number_input("列数 (一行放几张)", min_value=1, max_value=10, value=2)
+                grid_cols = st.number_input("列数", 1, 10, 2)
                 align_mode = 'max'
-
         with c3:
-            padding = st.slider("图片间距 (Padding)", 0, 100, 0)
-            bg_color = st.color_picker("背景/间距颜色", "#FFFFFF")
+            padding = st.slider("间距", 0, 100, 0)
+            bg_color = st.color_picker("背景色", "#FFFFFF")
 
         if st.button("✨ 开始拼接", type="primary", use_container_width=True):
             cols_param = grid_cols if stitch_mode == 'grid' else 1
-            st.session_state['stitched_result'] = stitch_images_advanced(
-                [clean_image(f) for f in sorted_files], 
-                mode=stitch_mode, 
-                alignment=align_mode,
-                cols=cols_param,
-                padding=padding,
-                bg_color=bg_color
-            )
+            st.session_state['stitched_result'] = stitch_images_advanced([clean_image(f) for f in sorted_files], stitch_mode, align_mode, cols_param, padding, bg_color)
             
     if st.session_state['stitched_result']:
         res = st.session_state['stitched_result']
-        st.success(f"拼接完成！尺寸: {res.width} x {res.height}")
+        st.success(f"完成: {res.width}x{res.height}")
         z = st.slider("预览缩放", 10, 100, 50, key="st_zoom")
-        st.download_button("📥 下载拼接大图", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary", use_container_width=True)
+        st.download_button("📥 下载", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary", use_container_width=True)
         st.image(res.resize((int(res.width*z/100), int(res.height*z/100))) if z<100 else res)
 
-# --- Tab 2: 参考线切图 ---
+# --- Tab 2: 参考线切图 (新增移动功能) ---
 with tab2:
     st.header("参考线贯穿切割 (Guillotine)")
     f = st.file_uploader("上传图片", type=['png','jpg','jpeg'], key="sl_up")
@@ -249,7 +191,15 @@ with tab2:
         c1, c2 = st.columns([1, 2])
         with c1:
             z = st.slider("缩放", 10, 100, 100, 10, key="sl_z") / 100.0
-            mode = st.radio("模式", ["⬇️ 垂直线", "➡️ 水平线"])
+            
+            # === [新增] 操作模式选择 ===
+            st.write("---")
+            op_mode = st.radio("操作模式", ["➕ 添加参考线", "✋ 移动/调整参考线"], horizontal=True)
+            if op_mode == "✋ 移动/调整参考线":
+                st.info("💡 移动模式：点击图片上 **现有的参考线附近**，它会跳到你点击的新位置。")
+            
+            line_type = st.radio("参考线类型", ["⬇️ 垂直线", "➡️ 水平线"])
+            
             st.caption(f"X坐标: {sorted(st.session_state.x_cuts)}")
             st.caption(f"Y坐标: {sorted(st.session_state.y_cuts)}")
             
@@ -282,17 +232,47 @@ with tab2:
             for x in st.session_state.x_cuts: draw.line([(x*z,0),(x*z,prev.height)], fill='red', width=3)
             for y in st.session_state.y_cuts: draw.line([(0,y*z),(prev.width,y*z)], fill='blue', width=3)
             val = streamlit_image_coordinates(prev, key="sl_pad")
+            
+            # === [核心逻辑] 点击处理 ===
             if val and val != st.session_state.last_click:
                 st.session_state.last_click = val
-                rx, ry = int(val['x']/z), int(val['y']/z)
-                if "垂直" in mode: 
-                    if rx not in st.session_state.x_cuts: 
-                        st.session_state.x_cuts.append(rx)
-                        st.session_state.cut_history.append(('x', rx))
+                click_x, click_y = int(val['x']/z), int(val['y']/z)
+                
+                # 分支 1: 添加模式
+                if "添加" in op_mode:
+                    if "垂直" in line_type: 
+                        if click_x not in st.session_state.x_cuts: 
+                            st.session_state.x_cuts.append(click_x)
+                            st.session_state.cut_history.append(('x', click_x))
+                    else:
+                        if click_y not in st.session_state.y_cuts: 
+                            st.session_state.y_cuts.append(click_y)
+                            st.session_state.cut_history.append(('y', click_y))
+                
+                # 分支 2: 移动模式 (新增)
                 else:
-                    if ry not in st.session_state.y_cuts: 
-                        st.session_state.y_cuts.append(ry)
-                        st.session_state.cut_history.append(('y', ry))
+                    # 逻辑：寻找离点击位置最近的线，把它删掉，然后在点击位置加一条新的
+                    if "垂直" in line_type:
+                        if st.session_state.x_cuts:
+                            # 找最近的 X
+                            closest_x = min(st.session_state.x_cuts, key=lambda x: abs(x - click_x))
+                            # 移除旧的
+                            st.session_state.x_cuts.remove(closest_x)
+                            # 添加新的
+                            st.session_state.x_cuts.append(click_x)
+                            st.toast(f"已将垂直线从 {closest_x} 移动到 {click_x}")
+                        else:
+                            st.warning("还没有垂直线可以移动")
+                    else:
+                        if st.session_state.y_cuts:
+                            # 找最近的 Y
+                            closest_y = min(st.session_state.y_cuts, key=lambda y: abs(y - click_y))
+                            st.session_state.y_cuts.remove(closest_y)
+                            st.session_state.y_cuts.append(click_y)
+                            st.toast(f"已将水平线从 {closest_y} 移动到 {click_y}")
+                        else:
+                            st.warning("还没有水平线可以移动")
+
                 st.rerun()
 
 # --- Tab 3: 修复 ---
@@ -351,25 +331,22 @@ with tab4:
                 if st.button("🔄 重新调整大小 (解锁)"):
                     st.session_state['canvas_locked'] = False
                     st.rerun()
-
                 if os.path.exists("temp_canvas_bg.png"):
                     bg_img_from_disk = Image.open("temp_canvas_bg.png")
                 else:
-                    st.error("缓存文件丢失，请重新解锁。")
+                    st.error("缓存丢失")
                     st.stop()
-                
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)", stroke_color="#FF0000", stroke_width=2,
                     background_image=bg_img_from_disk, update_streamlit=True,
                     height=bg_img_from_disk.height, width=bg_img_from_disk.width,
                     drawing_mode="rect", key=f"canvas_{st.session_state['canvas_key']}", display_toolbar=True
                 )
-
             with col_c2:
                 if canvas_result.json_data is not None:
                     objects = canvas_result.json_data["objects"]
                     count = len(objects)
-                    st.write(f"已选中 **{count}** 个")
+                    st.write(f"选中 {count} 个")
                     if count > 0:
                         if st.button(f"✂️ 执行切割", type="primary"):
                             zip_buffer = io.BytesIO()
