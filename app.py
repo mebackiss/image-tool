@@ -1,6 +1,6 @@
 import streamlit as st
-import uuid # [新增] 用于生成随机ID，强制刷新组件
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+import uuid
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps # [新增] ImageOps 用于修复微信图片旋转
 import io
 import zipfile
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -20,7 +20,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# === Session State 初始化 ===
+# === Session State ===
 for key in ['x_cuts', 'y_cuts', 'last_click', 'stitched_result', 'restored_image', 'original_for_restore']:
     if key not in st.session_state: st.session_state[key] = None if 'list' not in str(type(st.session_state.get(key))) else []
 if 'x_cuts' not in st.session_state: st.session_state['x_cuts'] = []
@@ -30,14 +30,25 @@ if 'y_cuts' not in st.session_state: st.session_state['y_cuts'] = []
 if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = False
 if 'locked_image' not in st.session_state: st.session_state['locked_image'] = None
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
-if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init" # [新增] 强制刷新的Key
+if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 
 # === 工具函数 ===
+
 def convert_image_to_bytes(img, fmt='PNG'):
     buf = io.BytesIO()
     if fmt.upper() in ['JPEG', 'JPG']: img.save(buf, format=fmt, quality=100, subsampling=0)
     else: img.save(buf, format=fmt)
     return buf.getvalue()
+
+# [新增] 深度清洗图片：修复EXIF旋转、强制RGB、去除杂质
+def clean_image(img_file):
+    image = Image.open(img_file)
+    # 1. 修复手机/微信拍照的旋转问题
+    image = ImageOps.exif_transpose(image)
+    # 2. 强制转为 RGB (去除 Alpha 通道，防止兼容性问题)
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    return image
 
 def enhance_image(image, upscale_factor=2.0, sharpness=2.0, contrast=1.1, color=1.1):
     if upscale_factor > 1.0:
@@ -86,14 +97,15 @@ with tab1:
         cols = st.columns(5)
         for i, f in enumerate(files):
             with cols[i%5]:
-                st.image(Image.open(f), use_container_width=True)
+                # 使用 clean_image 修复可能的显示问题
+                st.image(clean_image(f), use_container_width=True)
                 sort_data.append({"f": f, "r": st.number_input(f"No.", 1, value=i+1, key=f"s_{i}", label_visibility="collapsed")})
         sorted_files = [x["f"] for x in sorted(sort_data, key=lambda x: x["r"])]
         c1, c2 = st.columns(2)
         d = c1.radio("方向", ['vertical', 'horizontal'], format_func=lambda x: "⬇️ 竖向" if x=='vertical' else "➡️ 横向")
         a = c2.radio("对齐", ['max', 'original'], format_func=lambda x: "📏 自动对齐" if x=='max' else "🔳 保持原图")
         if st.button("开始拼接", type="primary"):
-            st.session_state['stitched_result'] = stitch_images([Image.open(f) for f in sorted_files], d, a)
+            st.session_state['stitched_result'] = stitch_images([clean_image(f) for f in sorted_files], d, a)
             
     if st.session_state['stitched_result']:
         res = st.session_state['stitched_result']
@@ -106,7 +118,7 @@ with tab2:
     st.header("参考线贯穿切割 (Guillotine)")
     f = st.file_uploader("上传图片", type=['png','jpg','jpeg'], key="sl_up")
     if f:
-        img = Image.open(f)
+        img = clean_image(f) # 修复
         if 'current_img' not in st.session_state or st.session_state.current_img != f.name:
             st.session_state.x_cuts, st.session_state.y_cuts = [], []
             st.session_state.current_img = f.name
@@ -142,7 +154,7 @@ with tab3:
     st.header("高清修复")
     f = st.file_uploader("上传图片", type=['png','jpg'], key="re_up")
     if f:
-        img = Image.open(f).convert("RGB")
+        img = clean_image(f) # 修复
         with st.expander("参数"):
             up, sh, co = st.checkbox("2倍放大", True), st.slider("锐化",0.0,5.0,2.0), st.slider("对比",0.5,2.0,1.2)
         if st.button("🚀 修复", type="primary"):
@@ -154,22 +166,22 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (UUID 强制刷新修复版) ---
+# --- Tab 4: 自由框选切割 (微信图片终极修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
-    # 状态重置
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
         st.session_state['locked_image'] = None
         st.session_state['locked_scale'] = 1.0
-        st.session_state['canvas_key'] = str(uuid.uuid4()) # 重置Key
+        st.session_state['canvas_key'] = str(uuid.uuid4())
 
     if crop_file:
-        original_img = Image.open(crop_file).convert("RGB")
+        # [核心] 使用 clean_image 彻底清洗图片，修复旋转和格式问题
+        original_img = clean_image(crop_file)
         w, h = original_img.size
         
         # === 阶段 1: 调整阶段 ===
@@ -183,7 +195,6 @@ with tab4:
             display_w = int(w * scale_factor)
             display_h = int(h * scale_factor)
             
-            # 使用最稳定的 st.image 进行预览
             preview_img = original_img.resize((display_w, display_h))
             st.image(preview_img, caption=f"预览效果 ({display_w} x {display_h})")
             
@@ -192,7 +203,6 @@ with tab4:
                 st.session_state['canvas_locked'] = True
                 st.session_state['locked_image'] = preview_img
                 st.session_state['locked_scale'] = scale_factor
-                # [核心修复] 生成一个新的随机Key，强制 st_canvas 重新加载，防止缓存白屏
                 st.session_state['canvas_key'] = str(uuid.uuid4())
                 st.rerun()
 
@@ -208,17 +218,16 @@ with tab4:
 
                 locked_img = st.session_state['locked_image']
                 
-                # 这里传回 PIL 对象，配合 key 强制刷新
+                # [关键点] 传递清洗后的 PIL 对象，配合 key 强制刷新
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=locked_img, # 传图片对象
+                    background_image=locked_img, 
                     update_streamlit=True,
                     height=locked_img.height,
                     width=locked_img.width,
                     drawing_mode="rect",
-                    # [重点] 每次点击锁定时这个Key都会变，强制组件重绘
                     key=f"canvas_{st.session_state['canvas_key']}", 
                     display_toolbar=True
                 )
