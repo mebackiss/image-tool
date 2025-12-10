@@ -21,7 +21,7 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0 0; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
     .stTabs [aria-selected="true"] { background-color: #ffffff; border-top: 2px solid #ff4b4b; }
-    div[data-testid="stImage"] img { object-fit: contain; max-height: 150px; }
+    div[data-testid="stImage"] img { object-fit: contain; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -38,6 +38,7 @@ if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = 
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] = None
+if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] # 存储画好的框
 
 # === 工具函数 ===
 
@@ -346,7 +347,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (终极JSON修复版) ---
+# --- Tab 4: 自由框选切割 (双模式+撤销) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
@@ -357,7 +358,8 @@ with tab4:
         st.session_state['canvas_locked'] = False
         st.session_state['locked_scale'] = 1.0
         st.session_state['canvas_key'] = str(uuid.uuid4())
-        st.session_state['canvas_bg_json'] = None # 重置JSON
+        st.session_state['canvas_bg_json'] = None
+        st.session_state['saved_rects'] = [] # 重置已画框框
 
     if crop_file:
         original_img = clean_image(crop_file)
@@ -370,9 +372,11 @@ with tab4:
             scale_factor = canvas_zoom / 100.0
             display_w = int(w * scale_factor)
             display_h = int(h * scale_factor)
+            
             preview_img = original_img.resize((display_w, display_h))
-            # 兼容性显示
-            st.image(preview_img, caption=f"预览效果 ({display_w} x {display_h})", use_column_width=False)
+            
+            # [核心修复] 强制指定 width，确保视觉上图片会变小，而不是被列宽自动填充
+            st.image(preview_img, width=display_w, caption=f"预览效果 ({display_w} x {display_h})")
             
             st.write("---")
             if st.button("🔒 大小合适了，锁定并开始画框", type="primary"):
@@ -380,7 +384,6 @@ with tab4:
                 st.session_state['locked_scale'] = scale_factor
                 st.session_state['canvas_key'] = str(uuid.uuid4())
                 
-                # [核心修复] 将图片转为 Base64 并构建 JSON
                 img_b64 = image_to_base64(preview_img)
                 bg_json = {
                     "version": "4.4.0",
@@ -394,7 +397,7 @@ with tab4:
                             "scaleX": 1, "scaleY": 1,
                             "opacity": 1, "visible": True, "backgroundColor": "",
                             "src": img_b64,
-                            "selectable": False, "evented": False # 锁定，不可选中
+                            "selectable": False, "evented": False
                         }
                     ]
                 }
@@ -402,62 +405,109 @@ with tab4:
                 st.rerun()
 
         else:
-            col_c1, col_c2 = st.columns([3, 1])
-            with col_c1:
-                st.success("✅ **第二步：请在下方直接拖拽画框**")
-                if st.button("🔄 重新调整大小 (解锁)"):
+            # === 第二步：画布操作区域 ===
+            c_tools, c_canvas = st.columns([1, 3])
+            
+            with c_tools:
+                st.success("✅ 画板已就绪")
+                
+                # [新增] 模式切换
+                draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
+                
+                st.write("---")
+                # [新增] 撤销与清空
+                if st.button("↩️ 撤销上一步", use_container_width=True):
+                    if st.session_state['saved_rects']:
+                        st.session_state['saved_rects'].pop()
+                        # 强制刷新 Key，让画布重绘
+                        st.session_state['canvas_key'] = str(uuid.uuid4()) 
+                        st.rerun()
+                    else:
+                        st.toast("没有可以撤销的操作")
+
+                if st.button("🗑️ 清空所有框", use_container_width=True):
+                    st.session_state['saved_rects'] = []
+                    st.session_state['canvas_key'] = str(uuid.uuid4())
+                    st.rerun()
+
+                st.write("---")
+                if st.button("🔄 解锁重置", use_container_width=True):
                     st.session_state['canvas_locked'] = False
                     st.rerun()
 
-                # [核心修复] 使用 initial_drawing 载入背景图，background_image 设为 None
+            with c_canvas:
                 if st.session_state['canvas_bg_json'] is None:
                     st.error("状态丢失，请解锁重试")
                     st.stop()
                     
-                # 获取锁定时计算的宽高
-                # 从JSON里取回宽高，确保一致
                 bg_w = st.session_state['canvas_bg_json']['objects'][0]['width']
                 bg_h = st.session_state['canvas_bg_json']['objects'][0]['height']
+
+                # 动态构建 initial_drawing: 背景图 + 已保存的框
+                # 这样切换模式或撤销时，框框不会丢失
+                current_drawing = {
+                    "version": "4.4.0",
+                    "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
+                }
+
+                # 根据模式设定 canvas 参数
+                real_mode = "rect" if "画框" in draw_mode else "transform"
 
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=None, # 禁用这个易报错的参数
-                    initial_drawing=st.session_state['canvas_bg_json'], # 使用JSON注入
+                    background_image=None,
+                    initial_drawing=current_drawing, # 注入混合好的数据
                     update_streamlit=True,
                     height=bg_h,
                     width=bg_w,
-                    drawing_mode="rect",
+                    drawing_mode=real_mode, # 动态切换模式
                     key=f"canvas_{st.session_state['canvas_key']}",
                     display_toolbar=True
                 )
 
-            with col_c2:
+                # [核心] 同步数据：每次操作后，把画布上的框存回 session_state
                 if canvas_result.json_data is not None:
-                    # 过滤掉 background image 对象，只保留用户画的 rect
-                    objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
-                    count = len(objects)
-                    st.write(f"已选中 **{count}** 个")
+                    # 过滤掉背景图(image)，只保留框框(rect)
+                    current_objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
                     
-                    if count > 0:
-                        if st.button(f"✂️ 执行切割", type="primary"):
-                            zip_buffer = io.BytesIO()
-                            with zipfile.ZipFile(zip_buffer, "w") as zf:
-                                scale = st.session_state['locked_scale']
-                                for i, obj in enumerate(objects):
-                                    real_x = int(obj["left"] / scale)
-                                    real_y = int(obj["top"] / scale)
-                                    # 有时候 width 会受 scaleX 影响
-                                    real_w = int((obj["width"] * obj["scaleX"]) / scale)
-                                    real_h = int((obj["height"] * obj["scaleY"]) / scale)
+                    # 只有当数量或内容发生变化时才更新 session，防止死循环
+                    if current_objects != st.session_state['saved_rects']:
+                        st.session_state['saved_rects'] = current_objects
+                        # 注意：这里不 st.rerun()，否则会打断用户的连续绘画
+                        # 只有点按钮(撤销/切换模式)导致Key变化时才强制刷新
+
+            # 底部下载区
+            st.divider()
+            count = len(st.session_state['saved_rects'])
+            st.write(f"当前已选中 **{count}** 个区域")
+            
+            if count > 0:
+                if st.button(f"✂️ 切割并下载这 {count} 张图", type="primary"):
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w") as zf:
+                        scale = st.session_state['locked_scale']
+                        for i, obj in enumerate(st.session_state['saved_rects']):
+                            # 坐标还原
+                            real_x = int(obj["left"] / scale)
+                            real_y = int(obj["top"] / scale)
+                            # 考虑 transform 模式下的缩放
+                            real_w = int((obj["width"] * obj.get("scaleX", 1)) / scale)
+                            real_h = int((obj["height"] * obj.get("scaleY", 1)) / scale)
+                            
+                            # 边界检查
+                            if real_w > 0 and real_h > 0:
+                                box = (real_x, real_y, real_x+real_w, real_y+real_h)
+                                try:
+                                    cropped = original_img.crop(box)
+                                    img_byte = io.BytesIO()
+                                    cropped.save(img_byte, format='PNG')
+                                    zf.writestr(f"crop_{i+1}.png", img_byte.getvalue())
+                                except:
+                                    pass # 忽略无效切割
                                     
-                                    if real_w > 0 and real_h > 0:
-                                        cropped = original_img.crop((real_x, real_y, real_x+real_w, real_y+real_h))
-                                        img_byte = io.BytesIO()
-                                        cropped.save(img_byte, format='PNG')
-                                        zf.writestr(f"crop_{i+1}.png", img_byte.getvalue())
-                            st.download_button("📦 下载ZIP", zip_buffer.getvalue(), "free_crops.zip", "application/zip")
+                    st.download_button("📦 下载ZIP", zip_buffer.getvalue(), "free_crops.zip", "application/zip")
 
 # --- Tab 5: 自由画布/拖拽拼图 ---
 with tab5:
