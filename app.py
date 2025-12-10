@@ -1,6 +1,4 @@
 import streamlit as st
-# [新增] 引入 numpy 库，用于把图片转为纯数据
-import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 import io
 import zipfile
@@ -150,7 +148,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (Numpy 暴力加载版) ---
+# --- Tab 4: 自由框选切割 (修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     st.caption("先调整下方滑块缩小图片，然后在图片上拖拽画框。")
@@ -158,48 +156,51 @@ with tab4:
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
     if crop_file:
-        original_img = Image.open(crop_file).convert("RGB")
+        original_img = Image.open(crop_file).convert("RGB") # 强制转RGB，防止RGBA导致的显示问题
         w, h = original_img.size
+        
         st.write(f"原图尺寸: {w} x {h}")
         
-        # 默认缩放
+        # === 核心修复：预览缩放滑块 ===
+        # 默认缩放到 60% 或者 800px 宽，方便操作
         default_zoom = 50 if w > 1000 else 100
-        canvas_zoom = st.slider("🔍 画布缩放 (%)", 10, 100, default_zoom, key="canvas_zoom")
+        canvas_zoom = st.slider("🔍 画布缩放 (%) - 调整此项会清空已画的框", 10, 100, default_zoom, key="canvas_zoom")
         
         scale_factor = canvas_zoom / 100.0
+        
+        # 计算显示尺寸
         display_w = int(w * scale_factor)
         display_h = int(h * scale_factor)
         
-        # === 核心修复: 转为 Numpy 数组 ===
-        # 1. 调整大小
+        # 实时生成一张缩略图用于显示（这解决了图片不显示的问题）
+        # 并且将 canvas 的宽高严格锁定为这张图的宽高
         display_img = original_img.resize((display_w, display_h))
-        # 2. 暴力转为数组，组件直接读取数据，不依赖文件系统
-        display_img_array = np.array(display_img)
 
         col_c1, col_c2 = st.columns([3, 1])
         
         with col_c1:
-            st.write("👇 **在下方直接拖拽画框：**")
-            
+            st.write("👇 **在下方拖拽画框：**")
+            # 绘图组件
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_color="#FF0000",
                 stroke_width=2,
-                background_image=display_img_array, # 这里传的是数组！
+                background_image=display_img, # 使用缩放后的图
                 update_streamlit=True,
-                height=display_h,
-                width=display_w,
+                height=display_h, # 严格匹配高度
+                width=display_w,  # 严格匹配宽度
                 drawing_mode="rect",
-                key=f"canvas_{canvas_zoom}_{crop_file.name}", 
+                key="canvas_cropper",
                 display_toolbar=True
             )
 
         with col_c2:
             st.info("💡 操作指南：")
             st.markdown("""
-            1. 调整滑块让图片完整显示。
+            1. **调整上方滑块**让图片完全显示。
             2. 鼠标左键**拖拽画框**。
             3. 支持画**多个框**。
+            4. 点击右侧按钮批量下载。
             """)
             
             if canvas_result.json_data is not None:
@@ -212,6 +213,8 @@ with tab4:
                         zip_buffer = io.BytesIO()
                         with zipfile.ZipFile(zip_buffer, "w") as zf:
                             for i, obj in enumerate(objects):
+                                # 核心逻辑：将画布坐标还原回原图坐标
+                                # 必须除以 scale_factor
                                 real_x = int(obj["left"] / scale_factor)
                                 real_y = int(obj["top"] / scale_factor)
                                 real_w = int(obj["width"] / scale_factor)
