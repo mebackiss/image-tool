@@ -21,8 +21,7 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0 0; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
     .stTabs [aria-selected="true"] { background-color: #ffffff; border-top: 2px solid #ff4b4b; }
-    /* 优化画布工具栏 */
-    div[data-testid="stDecoration"] { display: none; }
+    div[data-testid="stImage"] img { object-fit: contain; max-height: 150px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -34,9 +33,11 @@ if 'x_cuts' not in st.session_state: st.session_state['x_cuts'] = []
 if 'y_cuts' not in st.session_state: st.session_state['y_cuts'] = []
 if 'cut_history' not in st.session_state: st.session_state['cut_history'] = []
 
+# Tab 4 专用状态
 if 'canvas_locked' not in st.session_state: st.session_state['canvas_locked'] = False
 if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.0
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
+if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] = None
 
 # === 工具函数 ===
 
@@ -47,7 +48,7 @@ def convert_image_to_bytes(img, fmt='PNG'):
     return buf.getvalue()
 
 def image_to_base64(img):
-    """将PIL图片转换为Base64字符串，供Canvas使用"""
+    """将PIL图片转换为Base64字符串"""
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -143,7 +144,7 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
             result.paste(img, (x_offset, y_center))
             x_offset += img.width + padding
 
-    else: # Grid
+    else: 
         target_width = max(img.width for img in images)
         resized_imgs = []
         for img in images:
@@ -178,7 +179,7 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布 (拖拽拼图)"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -236,27 +237,19 @@ with tab1:
     if st.session_state['stitched_result']:
         res = st.session_state['stitched_result']
         st.success(f"拼接完成！尺寸: {res.width} x {res.height}")
-        
-        # === [修复] 预览控制：增加开关逻辑 ===
         col_view1, col_view2 = st.columns([1, 3])
         with col_view1:
             st.markdown("**预览设置：**")
             fit_screen = st.checkbox("📺 适应窗口宽度", value=True, key="fit_screen_check")
-            
-            # 只有当【不】适应窗口时，才显示像素缩放滑块
             if not fit_screen:
                 zoom_factor = st.slider("🔍 像素缩放 (%)", 1, 100, 20, key="pixel_zoom_slider")
             else:
                 st.caption("已锁定适应窗口宽度")
 
         st.download_button("📥 下载拼接大图", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary", use_container_width=True)
-        
-        # 显示逻辑
         if fit_screen:
-            # use_column_width=True 会强制图片填满列宽，无论图片多大都不会溢出
             st.image(res, use_column_width=True, caption="预览 (适应窗口)")
         else:
-            # 使用像素级控制
             new_w = max(1, int(res.width * zoom_factor / 100))
             st.image(res, width=new_w, caption=f"预览 ({zoom_factor}%)")
 
@@ -280,7 +273,6 @@ with tab2:
             line_type = st.radio("类型", ["⬇️ 垂直线", "➡️ 水平线"])
             st.caption(f"X: {sorted(st.session_state.x_cuts)}")
             st.caption(f"Y: {sorted(st.session_state.y_cuts)}")
-            
             b_col1, b_col2 = st.columns(2)
             with b_col1:
                 if st.button("🗑️ 清空", use_container_width=True): 
@@ -354,19 +346,23 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 ---
+# --- Tab 4: 自由框选切割 (终极JSON修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
+    
+    # 切换图片时重置
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
         st.session_state['locked_scale'] = 1.0
         st.session_state['canvas_key'] = str(uuid.uuid4())
+        st.session_state['canvas_bg_json'] = None # 重置JSON
 
     if crop_file:
         original_img = clean_image(crop_file)
         w, h = original_img.size
+        
         if not st.session_state['canvas_locked']:
             st.info("👇 **第一步：请先拖动滑块，调整到你能看清全图的大小**")
             default_zoom = 50 if w > 1000 else 100
@@ -375,14 +371,36 @@ with tab4:
             display_w = int(w * scale_factor)
             display_h = int(h * scale_factor)
             preview_img = original_img.resize((display_w, display_h))
+            # 兼容性显示
             st.image(preview_img, caption=f"预览效果 ({display_w} x {display_h})", use_column_width=False)
+            
             st.write("---")
             if st.button("🔒 大小合适了，锁定并开始画框", type="primary"):
                 st.session_state['canvas_locked'] = True
                 st.session_state['locked_scale'] = scale_factor
                 st.session_state['canvas_key'] = str(uuid.uuid4())
-                preview_img.save("temp_canvas_bg.png", format="PNG")
+                
+                # [核心修复] 将图片转为 Base64 并构建 JSON
+                img_b64 = image_to_base64(preview_img)
+                bg_json = {
+                    "version": "4.4.0",
+                    "objects": [
+                        {
+                            "type": "image",
+                            "version": "4.4.0",
+                            "originX": "left", "originY": "top", "left": 0, "top": 0,
+                            "width": display_w, "height": display_h,
+                            "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
+                            "scaleX": 1, "scaleY": 1,
+                            "opacity": 1, "visible": True, "backgroundColor": "",
+                            "src": img_b64,
+                            "selectable": False, "evented": False # 锁定，不可选中
+                        }
+                    ]
+                }
+                st.session_state['canvas_bg_json'] = bg_json
                 st.rerun()
+
         else:
             col_c1, col_c2 = st.columns([3, 1])
             with col_c1:
@@ -390,22 +408,38 @@ with tab4:
                 if st.button("🔄 重新调整大小 (解锁)"):
                     st.session_state['canvas_locked'] = False
                     st.rerun()
-                if os.path.exists("temp_canvas_bg.png"):
-                    bg_img_from_disk = Image.open("temp_canvas_bg.png")
-                else:
-                    st.error("缓存文件丢失，请重新解锁。")
+
+                # [核心修复] 使用 initial_drawing 载入背景图，background_image 设为 None
+                if st.session_state['canvas_bg_json'] is None:
+                    st.error("状态丢失，请解锁重试")
                     st.stop()
+                    
+                # 获取锁定时计算的宽高
+                # 从JSON里取回宽高，确保一致
+                bg_w = st.session_state['canvas_bg_json']['objects'][0]['width']
+                bg_h = st.session_state['canvas_bg_json']['objects'][0]['height']
+
                 canvas_result = st_canvas(
-                    fill_color="rgba(255, 165, 0, 0.3)", stroke_color="#FF0000", stroke_width=2,
-                    background_image=bg_img_from_disk, update_streamlit=True,
-                    height=bg_img_from_disk.height, width=bg_img_from_disk.width,
-                    drawing_mode="rect", key=f"canvas_{st.session_state['canvas_key']}", display_toolbar=True
+                    fill_color="rgba(255, 165, 0, 0.3)",
+                    stroke_color="#FF0000",
+                    stroke_width=2,
+                    background_image=None, # 禁用这个易报错的参数
+                    initial_drawing=st.session_state['canvas_bg_json'], # 使用JSON注入
+                    update_streamlit=True,
+                    height=bg_h,
+                    width=bg_w,
+                    drawing_mode="rect",
+                    key=f"canvas_{st.session_state['canvas_key']}",
+                    display_toolbar=True
                 )
+
             with col_c2:
                 if canvas_result.json_data is not None:
-                    objects = canvas_result.json_data["objects"]
+                    # 过滤掉 background image 对象，只保留用户画的 rect
+                    objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
                     count = len(objects)
                     st.write(f"已选中 **{count}** 个")
+                    
                     if count > 0:
                         if st.button(f"✂️ 执行切割", type="primary"):
                             zip_buffer = io.BytesIO()
@@ -414,8 +448,10 @@ with tab4:
                                 for i, obj in enumerate(objects):
                                     real_x = int(obj["left"] / scale)
                                     real_y = int(obj["top"] / scale)
-                                    real_w = int(obj["width"] / scale)
-                                    real_h = int(obj["height"] / scale)
+                                    # 有时候 width 会受 scaleX 影响
+                                    real_w = int((obj["width"] * obj["scaleX"]) / scale)
+                                    real_h = int((obj["height"] * obj["scaleY"]) / scale)
+                                    
                                     if real_w > 0 and real_h > 0:
                                         cropped = original_img.crop((real_x, real_y, real_x+real_w, real_y+real_h))
                                         img_byte = io.BytesIO()
@@ -423,117 +459,52 @@ with tab4:
                                         zf.writestr(f"crop_{i+1}.png", img_byte.getvalue())
                             st.download_button("📦 下载ZIP", zip_buffer.getvalue(), "free_crops.zip", "application/zip")
 
-# === Tab 5: 自由画布/拖拽拼图 (New Feature) ===
+# --- Tab 5: 自由画布/拖拽拼图 ---
 with tab5:
     st.header("🎨 自由画布 (Free Canvas)")
-    st.markdown("在这里，你可以像在 PPT 或美图秀秀里一样，**拖拽、缩放、旋转**图片，自由组合。")
-    
+    st.markdown("像PPT一样**拖拽、缩放、旋转**图片，自由组合。")
     free_files = st.file_uploader("上传素材图片", type=['png','jpg','jpeg','webp'], accept_multiple_files=True, key="free_canvas_up")
     
     if free_files:
-        # 画布尺寸设置
         c1, c2, c3 = st.columns(3)
         cw = c1.number_input("画布宽度", 500, 3000, 800)
         ch = c2.number_input("画布高度", 500, 3000, 600)
         bg = c3.color_picker("画布背景", "#FFFFFF")
         
-        # 将上传的图片转换为 Canvas 可识别的初始对象
-        # 注意：这里只在第一次上传时初始化，否则会重置位置
         if 'canvas_objects' not in st.session_state or st.session_state.get('last_uploaded_files') != free_files:
             initial_json = {"version": "4.4.0", "objects": []}
-            
             for idx, f in enumerate(free_files):
                 img = clean_image(f)
-                # 为了防止大图卡死，这里做个缩略处理，但下载时可能清晰度受限
-                # 这是一个权衡：Web端交互性能 vs 画质
-                # 如果图太大，缩到宽 400
                 if img.width > 400:
                     ratio = 400 / img.width
                     img = img.resize((400, int(img.height * ratio)))
-                
                 img_b64 = image_to_base64(img)
-                
-                # 创建 fabric.js 对象
                 obj = {
-                    "type": "image",
-                    "version": "4.4.0",
-                    "originX": "left",
-                    "originY": "top",
-                    "left": 50 + (idx * 30), # 错位排列
-                    "top": 50 + (idx * 30),
-                    "width": img.width,
-                    "height": img.height,
-                    "fill": "rgb(0,0,0)",
-                    "stroke": None,
-                    "strokeWidth": 0,
-                    "strokeDashArray": None,
-                    "strokeLineCap": "butt",
-                    "strokeDashOffset": 0,
-                    "strokeLineJoin": "miter",
-                    "strokeMiterLimit": 4,
-                    "scaleX": 1,
-                    "scaleY": 1,
-                    "angle": 0,
-                    "flipX": False,
-                    "flipY": False,
-                    "opacity": 1,
-                    "shadow": None,
-                    "visible": True,
-                    "clipTo": None,
-                    "backgroundColor": "",
-                    "fillRule": "nonzero",
-                    "paintFirst": "fill",
-                    "globalCompositeOperation": "source-over",
-                    "skewX": 0,
-                    "skewY": 0,
-                    "cropX": 0,
-                    "cropY": 0,
-                    "src": img_b64,
-                    "crossOrigin": None,
-                    "filters": []
+                    "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
+                    "left": 50 + (idx * 30), "top": 50 + (idx * 30),
+                    "width": img.width, "height": img.height,
+                    "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
+                    "scaleX": 1, "scaleY": 1, "angle": 0, "flipX": False, "flipY": False,
+                    "opacity": 1, "visible": True, "backgroundColor": "",
+                    "src": img_b64, "selectable": True, "evented": True
                 }
                 initial_json["objects"].append(obj)
-            
             st.session_state['canvas_json'] = initial_json
             st.session_state['last_uploaded_files'] = free_files
 
-        # 渲染画布
         canvas_result = st_canvas(
-            fill_color=bg, # 其实没用，因为我们用的是 transform 模式
-            stroke_color="rgba(0, 0, 0, 0)",
-            background_color=bg,
-            background_image=None,
-            update_streamlit=True,
-            height=ch,
-            width=cw,
-            drawing_mode="transform", # 关键：变换模式，允许拖拽
-            initial_drawing=st.session_state['canvas_json'],
-            key="free_canvas_board",
-            display_toolbar=True
+            fill_color=bg, stroke_color="rgba(0, 0, 0, 0)", background_color=bg, background_image=None,
+            update_streamlit=True, height=ch, width=cw, drawing_mode="transform",
+            initial_drawing=st.session_state['canvas_json'], key="free_canvas_board", display_toolbar=True
         )
-        
-        st.caption("💡 提示：选中图片后，拖拽角标可缩放/旋转，按 Delete 键可删除。")
+        st.caption("提示：点击图片选中，Delete键删除，拖动边框缩放/旋转。")
         
         if canvas_result.image_data is not None:
-            # st_canvas 返回的是 RGBA 数组
             result_image = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
-            
             st.divider()
-            st.write("### 🖼️ 结果预览与下载")
             col_d1, col_d2 = st.columns([1, 1])
-            
-            with col_d1:
-                st.image(result_image, caption="画布截图", use_column_width=True)
-                
+            with col_d1: st.image(result_image, caption="画布截图", use_column_width=True)
             with col_d2:
-                # 转换为 RGB (去除透明背景，或者保留看用户)
-                # 这里默认转 RGB 存为 PNG
                 buf = io.BytesIO()
                 result_image.save(buf, format="PNG")
-                st.download_button(
-                    label="📥 下载当前画布设计",
-                    data=buf.getvalue(),
-                    file_name="my_design.png",
-                    mime="image/png",
-                    type="primary"
-                )
+                st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
