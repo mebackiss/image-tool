@@ -19,6 +19,8 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0 0; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
     .stTabs [aria-selected="true"] { background-color: #ffffff; border-top: 2px solid #ff4b4b; }
+    /* 优化缩略图显示 */
+    div[data-testid="stImage"] img { object-fit: contain; max-height: 150px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -42,21 +44,16 @@ def convert_image_to_bytes(img, fmt='PNG'):
     else: img.save(buf, format=fmt)
     return buf.getvalue()
 
-# [核心修复] 防崩溃图片清洗函数
 def clean_image(uploaded_file):
     try:
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         img = Image.open(io.BytesIO(file_bytes))
-        
-        # 尝试修复旋转，失败则跳过
         try:
             if hasattr(img, '_getexif'):
                 img = ImageOps.exif_transpose(img)
-        except:
-            pass 
+        except: pass 
         
-        # 重绘图片，消除格式隐患
         new_img = Image.new("RGB", img.size, (255, 255, 255))
         if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
             if img.mode != 'RGBA': img = img.convert('RGBA')
@@ -64,9 +61,7 @@ def clean_image(uploaded_file):
         else:
             new_img.paste(img)
         return new_img
-        
     except Exception as e:
-        # 返回一个红色的错误占位图，防止程序彻底崩溃
         err_img = Image.new('RGB', (200, 50), (255, 200, 200))
         draw = ImageDraw.Draw(err_img)
         draw.text((10, 10), "Error", fill="red")
@@ -88,75 +83,123 @@ def slice_image_by_guides(img, xs, ys):
     ys = sorted(list(set([0] + ys + [img.height])))
     return [img.crop((xs[i], ys[j], xs[i+1], ys[j+1])) for j in range(len(ys)-1) for i in range(len(xs)-1) if xs[i+1]>xs[i] and ys[j+1]>ys[j]]
 
-def stitch_images_advanced(images, mode='vertical', alignment='max', cols=2, padding=0, bg_color='#FFFFFF'):
-    if not images: return None
+# 核心拼接算法 (增加单图处理逻辑)
+def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2, padding=0, bg_color='#FFFFFF'):
+    # images_data 包含: {'img': PIL对象, 'scale': 缩放比例, 'rotate': 旋转角度}
+    if not images_data: return None
+    
     bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+
+    # 1. 预处理：先对每一张单图进行旋转和缩放
+    processed_inputs = []
+    for item in images_data:
+        img = item['img']
+        scale = item['scale']
+        rotate = item['rotate']
+        
+        # 旋转
+        if rotate != 0:
+            img = img.rotate(-rotate, expand=True) # 负号是因为PIL是逆时针
+        
+        # 缩放 (保持高质量)
+        if scale != 1.0:
+            new_w = int(img.width * scale)
+            new_h = int(img.height * scale)
+            if new_w > 0 and new_h > 0:
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
+        processed_inputs.append(img)
+
+    images = processed_inputs # 使用处理后的图片列表进行拼接
 
     if mode == 'vertical':
         max_width = max(img.width for img in images)
-        processed_imgs = []
+        final_imgs = []
         for img in images:
             if alignment == 'max' and img.width != max_width:
                 ratio = max_width / img.width
                 new_height = int(img.height * ratio)
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
-            processed_imgs.append(img)
-        total_height = sum(img.height for img in processed_imgs) + (len(processed_imgs) - 1) * padding
+            final_imgs.append(img)
+            
+        total_height = sum(img.height for img in final_imgs) + (len(final_imgs) - 1) * padding
         result = Image.new('RGB', (max_width, total_height), bg_color_rgb)
+        
         y_offset = 0
-        for img in processed_imgs:
+        for img in final_imgs:
             x_center = (max_width - img.width) // 2
             result.paste(img, (x_center, y_offset))
             y_offset += img.height + padding
             
     elif mode == 'horizontal':
         max_height = max(img.height for img in images)
-        processed_imgs = []
+        final_imgs = []
         for img in images:
             if alignment == 'max' and img.height != max_height:
                 ratio = max_height / img.height
                 new_width = int(img.width * ratio)
                 img = img.resize((new_width, max_height), Image.Resampling.LANCZOS)
-            processed_imgs.append(img)
-        total_width = sum(img.width for img in processed_imgs) + (len(processed_imgs) - 1) * padding
+            final_imgs.append(img)
+            
+        total_width = sum(img.width for img in final_imgs) + (len(final_imgs) - 1) * padding
         result = Image.new('RGB', (total_width, max_height), bg_color_rgb)
+        
         x_offset = 0
-        for img in processed_imgs:
+        for img in final_imgs:
             y_center = (max_height - img.height) // 2
             result.paste(img, (x_offset, y_center))
             x_offset += img.width + padding
 
-    else:
+    else: # Grid Mode
         target_width = max(img.width for img in images)
         resized_imgs = []
         for img in images:
-            ratio = target_width / img.width
-            new_h = int(img.height * ratio)
-            img = img.resize((target_width, new_h), Image.Resampling.LANCZOS)
+            # 网格模式下，通常需要统一宽度以保证对齐
+            # 但用户如果想保持单图缩放效果，这里是一个取舍
+            # 策略：以最宽图为基准，按照 alignment 策略决定是否强制拉伸
+            if alignment == 'max':
+                ratio = target_width / img.width
+                new_h = int(img.height * ratio)
+                img = img.resize((target_width, new_h), Image.Resampling.LANCZOS)
             resized_imgs.append(img)
+            
         num_images = len(resized_imgs)
         rows = math.ceil(num_images / cols)
+        
         row_heights = []
         for r in range(rows):
             row_imgs = resized_imgs[r*cols : (r+1)*cols]
-            max_h_in_row = max(img.height for img in row_imgs)
-            row_heights.append(max_h_in_row)
+            if row_imgs:
+                max_h_in_row = max(img.height for img in row_imgs)
+                row_heights.append(max_h_in_row)
+            else:
+                row_heights.append(0)
+            
         total_w = cols * target_width + (cols - 1) * padding
         total_h = sum(row_heights) + (rows - 1) * padding
+        
         result = Image.new('RGB', (total_w, total_h), bg_color_rgb)
+        
         for i, img in enumerate(resized_imgs):
             r = i // cols
             c = i % cols
             x = c * (target_width + padding)
             y = sum(row_heights[:r]) + r * padding
-            result.paste(img, (x, y))
+            
+            # 在网格单元内居中
+            x_center = x + (target_width - img.width) // 2
+            # 垂直居中于该行
+            row_h = row_heights[r]
+            y_center = y + (row_h - img.height) // 2
+            
+            result.paste(img, (x_center, y_center))
             
     return result
 
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割"])
+tab1, tab2, tab3, tab4 = st.tabs(["🧩 智能拼图 (高级版)", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -164,24 +207,50 @@ with tab1:
     files = st.file_uploader("上传图片", type=['png','jpg','jpeg','webp'], accept_multiple_files=True, key="stitch_up")
     
     if files:
-        st.markdown("##### 🔢 调整顺序 (数字越小越靠前)")
-        sort_data = []
-        cols_ui = st.columns(5)
+        st.info("👇 **单张图片调整区：** 你可以在这里单独调整每一张图片的大小、旋转和顺序。")
+        
+        # 收集用户设置的数据
+        image_settings = []
+        
+        # 使用列布局显示图片设置卡片
         for i, f in enumerate(files):
-            with cols_ui[i%5]:
-                # [安全气囊] 这里加了 try-except，防止单张坏图炸掉整个应用
-                try:
-                    img_safe = clean_image(f)
-                    # [兼容性修复] 改回 use_column_width，兼容旧版本 Streamlit
-                    st.image(img_safe, use_column_width=True)
-                    sort_data.append({"f": f, "r": st.number_input(f"No.", 1, value=i+1, key=f"s_{i}", label_visibility="collapsed")})
-                except Exception as e:
-                    st.error(f"图片加载失败: {f.name}")
+            with st.container():
+                c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+                
+                # 1. 预览图
+                with c1:
+                    try:
+                        img_safe = clean_image(f)
+                        st.image(img_safe, use_column_width=True)
+                    except:
+                        st.error("图片错误")
+                        continue
 
-        sorted_files = [x["f"] for x in sorted(sort_data, key=lambda x: x["r"])]
+                # 2. 顺序
+                with c2:
+                    rank = st.number_input(f"图片 {i+1} 顺序", min_value=1, value=i+1, key=f"rank_{i}", help="数字越小越靠前")
+                
+                # 3. 缩放
+                with c3:
+                    scale = st.slider(f"单独缩放", 0.1, 2.0, 1.0, 0.1, key=f"scale_{i}", help="仅调整这张图的大小")
+                
+                # 4. 旋转
+                with c4:
+                    rotate = st.selectbox(f"旋转", [0, 90, 180, 270], key=f"rot_{i}", format_func=lambda x: f"🔄 {x}°")
+                
+                image_settings.append({
+                    "file": f,
+                    "img": img_safe,
+                    "rank": rank,
+                    "scale": scale,
+                    "rotate": rotate
+                })
+                st.divider() # 分隔线
+
+        # 排序
+        sorted_settings = sorted(image_settings, key=lambda x: x["rank"])
         
-        st.divider()
-        
+        st.markdown("### ⚙️ 全局设置")
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
             stitch_mode = st.radio("拼接模式", ['vertical', 'horizontal', 'grid'], 
@@ -191,9 +260,11 @@ with tab1:
             if stitch_mode != 'grid':
                 align_mode = st.radio("对齐方式", ['max', 'original'], 
                                       format_func=lambda x: "📏 自动拉伸对齐" if x=='max' else "🔳 保持原图尺寸")
+                st.caption("注：选择'自动拉伸'会覆盖单图的缩放设置")
             else:
                 grid_cols = st.number_input("列数 (一行放几张)", min_value=1, max_value=10, value=2)
-                align_mode = 'max'
+                align_mode = 'original' # 网格模式下默认保持原图，允许用户自由缩放
+                st.caption("网格模式下建议配合单图缩放使用")
 
         with c3:
             padding = st.slider("图片间距 (Padding)", 0, 100, 0)
@@ -203,7 +274,7 @@ with tab1:
             try:
                 cols_param = grid_cols if stitch_mode == 'grid' else 1
                 st.session_state['stitched_result'] = stitch_images_advanced(
-                    [clean_image(f) for f in sorted_files], 
+                    sorted_settings, # 传入包含设置的列表
                     mode=stitch_mode, 
                     alignment=align_mode,
                     cols=cols_param,
@@ -211,17 +282,36 @@ with tab1:
                     bg_color=bg_color
                 )
             except Exception as e:
-                st.error(f"拼接过程中发生错误: {e}")
+                st.error(f"拼接错误: {e}")
             
     if st.session_state['stitched_result']:
         res = st.session_state['stitched_result']
         st.success(f"拼接完成！尺寸: {res.width} x {res.height}")
-        z = st.slider("预览缩放", 10, 100, 50, key="st_zoom")
-        st.download_button("📥 下载拼接大图", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary", use_container_width=True)
-        # [兼容性修复] 同样改为 use_column_width
-        st.image(res.resize((int(res.width*z/100), int(res.height*z/100))) if z<100 else res, use_column_width=True)
+        
+        # === [核心修复] 预览控制 ===
+        col_view1, col_view2 = st.columns([1, 3])
+        with col_view1:
+            st.markdown("**预览设置：**")
+            fit_screen = st.checkbox("📺 适应窗口宽度", value=True, help="勾选后图片会自动缩放以适应屏幕，方便查看全貌。")
+            
+            if not fit_screen:
+                zoom_factor = st.slider("🔍 像素缩放 (%)", 1, 100, 50)
+            else:
+                st.caption("已锁定适应窗口宽度")
 
-# --- Tab 2: 参考线切图 (升级版) ---
+        st.download_button("📥 下载拼接大图 (高清原图)", convert_image_to_bytes(res), "stitch.png", "image/png", type="primary", use_container_width=True)
+        
+        # 显示逻辑
+        if fit_screen:
+            # use_column_width=True 强制适应屏幕，解决"预览太大"的问题
+            st.image(res, use_column_width=True, caption="全貌预览 (下载文件为原图)")
+        else:
+            # 只有取消勾选后，才使用滑块控制像素大小
+            new_w = max(1, int(res.width * zoom_factor / 100))
+            new_h = max(1, int(res.height * zoom_factor / 100))
+            st.image(res.resize((new_w, new_h)), caption=f"像素级预览 ({zoom_factor}%)")
+
+# --- Tab 2: 参考线切图 ---
 with tab2:
     st.header("参考线贯穿切割 (Guillotine)")
     f = st.file_uploader("上传图片", type=['png','jpg','jpeg'], key="sl_up")
