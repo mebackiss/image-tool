@@ -1,4 +1,6 @@
 import streamlit as st
+# [新增] 引入 numpy 库，用于把图片转为纯数据
+import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 import io
 import zipfile
@@ -148,7 +150,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (终极修复版) ---
+# --- Tab 4: 自由框选切割 (Numpy 暴力加载版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     st.caption("先调整下方滑块缩小图片，然后在图片上拖拽画框。")
@@ -156,12 +158,11 @@ with tab4:
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
     if crop_file:
-        # 1. 强制转 RGB (防止 RGBA 或 CMYK 导致的显示兼容性问题)
         original_img = Image.open(crop_file).convert("RGB")
         w, h = original_img.size
         st.write(f"原图尺寸: {w} x {h}")
         
-        # 2. 缩放逻辑
+        # 默认缩放
         default_zoom = 50 if w > 1000 else 100
         canvas_zoom = st.slider("🔍 画布缩放 (%)", 10, 100, default_zoom, key="canvas_zoom")
         
@@ -169,25 +170,25 @@ with tab4:
         display_w = int(w * scale_factor)
         display_h = int(h * scale_factor)
         
-        # === 核心修复点 ===
-        # 不再使用 BytesIO，直接 resize，并使用 .copy() 确保像素数据在内存中是“热”的
-        # 这样 st_canvas 就能读到数据了
-        display_img = original_img.resize((display_w, display_h)).copy()
+        # === 核心修复: 转为 Numpy 数组 ===
+        # 1. 调整大小
+        display_img = original_img.resize((display_w, display_h))
+        # 2. 暴力转为数组，组件直接读取数据，不依赖文件系统
+        display_img_array = np.array(display_img)
 
         col_c1, col_c2 = st.columns([3, 1])
         
         with col_c1:
             st.write("👇 **在下方直接拖拽画框：**")
             
-            # 使用动态 Key 确保每次缩放都彻底重绘组件
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_color="#FF0000",
                 stroke_width=2,
-                background_image=display_img, # 直接传入 copy 后的对象
+                background_image=display_img_array, # 这里传的是数组！
                 update_streamlit=True,
-                height=display_h, # 严格匹配高度
-                width=display_w,  # 严格匹配宽度
+                height=display_h,
+                width=display_w,
                 drawing_mode="rect",
                 key=f"canvas_{canvas_zoom}_{crop_file.name}", 
                 display_toolbar=True
