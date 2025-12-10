@@ -2,3 +2,4 @@ streamlit==1.39.0
 pillow
 streamlit-image-coordinates
 streamlit-image-comparison
+streamlit-drawable-canvas
