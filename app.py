@@ -39,9 +39,15 @@ if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] = None
 if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] 
-# [关键新增] 冻结的画布状态，防止死循环
 if 'frozen_drawing' not in st.session_state: st.session_state['frozen_drawing'] = None
 if 'last_draw_mode' not in st.session_state: st.session_state['last_draw_mode'] = "✏️ 画框模式"
+
+# Tab 6 (标注) 专用状态
+if 'annotate_locked' not in st.session_state: st.session_state['annotate_locked'] = False
+if 'annotate_scale' not in st.session_state: st.session_state['annotate_scale'] = 1.0
+if 'annotate_key' not in st.session_state: st.session_state['annotate_key'] = "init_anno"
+if 'annotate_bg_base64' not in st.session_state: st.session_state['annotate_bg_base64'] = None
+if 'annotate_objects' not in st.session_state: st.session_state['annotate_objects'] = []
 
 # === 工具函数 ===
 
@@ -184,7 +190,7 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "📝 图片标注 (新)"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -405,7 +411,6 @@ with tab4:
                     ]
                 }
                 st.session_state['canvas_bg_json'] = bg_json
-                # [核心] 初始化冻结的输入状态
                 st.session_state['frozen_drawing'] = bg_json
                 st.rerun()
 
@@ -416,10 +421,8 @@ with tab4:
                 st.success("✅ 画板已就绪")
                 draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
                 
-                # [核心] 监听模式切换，模式切换时强制更新输入
                 if draw_mode != st.session_state.get('last_draw_mode'):
                     st.session_state['last_draw_mode'] = draw_mode
-                    # 切换模式时，将当前已画的框同步进 input，并刷新key
                     st.session_state['frozen_drawing'] = {
                         "version": "4.4.0",
                         "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
@@ -431,7 +434,6 @@ with tab4:
                 if st.button("↩️ 撤销上一步", use_container_width=True):
                     if st.session_state['saved_rects']:
                         st.session_state['saved_rects'].pop()
-                        # 撤销时，更新输入，刷新key
                         st.session_state['frozen_drawing'] = {
                             "version": "4.4.0",
                             "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
@@ -443,7 +445,6 @@ with tab4:
 
                 if st.button("🗑️ 清空所有框", use_container_width=True):
                     st.session_state['saved_rects'] = []
-                    # 清空时，输入重置为纯背景
                     st.session_state['frozen_drawing'] = st.session_state['canvas_bg_json']
                     st.session_state['canvas_key'] = str(uuid.uuid4())
                     st.rerun()
@@ -468,7 +469,6 @@ with tab4:
                     stroke_color="#FF0000",
                     stroke_width=2,
                     background_image=None,
-                    # [核心修复] 使用冻结的输入，除非点击按钮否则永远不更新这个参数
                     initial_drawing=st.session_state['frozen_drawing'],
                     update_streamlit=True,
                     height=bg_h,
@@ -479,7 +479,6 @@ with tab4:
                 )
 
                 if canvas_result.json_data is not None:
-                    # 只读取，不反向写入 initial_drawing
                     current_objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
                     if current_objects != st.session_state['saved_rects']:
                         st.session_state['saved_rects'] = current_objects
@@ -559,3 +558,144 @@ with tab5:
                 buf = io.BytesIO()
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
+
+# --- Tab 6: 标注工具 (New) ---
+with tab6:
+    st.header("📝 图片标注 (Annotation)")
+    st.markdown("像微信截图一样添加：**箭头、线条、方框、文字、画笔**。")
+    
+    anno_file = st.file_uploader("上传图片", type=['png','jpg','jpeg','webp'], key="anno_up")
+    
+    if anno_file and ('anno_filename' not in st.session_state or st.session_state.anno_filename != anno_file.name):
+        st.session_state['anno_filename'] = anno_file.name
+        st.session_state['annotate_locked'] = False
+        st.session_state['annotate_key'] = str(uuid.uuid4())
+        st.session_state['annotate_objects'] = []
+        st.session_state['annotate_bg_base64'] = None
+
+    if anno_file:
+        original_img = clean_image(anno_file)
+        w, h = original_img.size
+        
+        if not st.session_state['annotate_locked']:
+            st.info("👇 **第一步：调整预览大小（建议让图片完整显示在屏幕内）**")
+            default_zoom = 50 if w > 1000 else 100
+            zoom = st.slider("🔍 缩放 (%)", 10, 100, default_zoom, key="anno_zoom")
+            scale = zoom / 100.0
+            dw, dh = int(w * scale), int(h * scale)
+            preview = original_img.resize((dw, dh))
+            st.image(preview, width=dw, caption=f"画布大小: {dw} x {dh}")
+            st.write("---")
+            if st.button("🔒 锁定并开始标注", type="primary"):
+                st.session_state['annotate_locked'] = True
+                st.session_state['annotate_scale'] = scale
+                st.session_state['annotate_bg_base64'] = image_to_base64(preview)
+                st.session_state['annotate_key'] = str(uuid.uuid4())
+                st.rerun()
+        else:
+            c_tools, c_canvas = st.columns([1, 4])
+            
+            with c_tools:
+                st.success("✅ 开始标注")
+                
+                # 工具选择
+                tool = st.radio("工具", ["🖌️ 画笔", "➖ 直线/箭头", "🔲 矩形框", "🔴 圆形框", "📝 文字", "✋ 调整/移动"])
+                
+                # 样式设置
+                stroke_color = st.color_picker("颜色", "#FF0000")
+                stroke_width = st.slider("粗细", 1, 20, 3)
+                
+                if tool == "📝 文字":
+                    text_val = st.text_input("输入文字", "文字标注")
+                    text_size = st.slider("字号", 10, 100, 20)
+                
+                st.divider()
+                
+                if st.button("↩️ 撤销上一步", use_container_width=True):
+                    if st.session_state['annotate_objects']:
+                        st.session_state['annotate_objects'].pop()
+                        st.session_state['annotate_key'] = str(uuid.uuid4())
+                        st.rerun()
+                
+                if st.button("🗑️ 清空所有", use_container_width=True):
+                    st.session_state['annotate_objects'] = []
+                    st.session_state['annotate_key'] = str(uuid.uuid4())
+                    st.rerun()
+                    
+                if st.button("🔄 解锁重置", use_container_width=True):
+                    st.session_state['annotate_locked'] = False
+                    st.rerun()
+
+            with c_canvas:
+                # 映射模式
+                mode_map = {
+                    "🖌️ 画笔": "freedraw",
+                    "➖ 直线/箭头": "line",
+                    "🔲 矩形框": "rect",
+                    "🔴 圆形框": "circle",
+                    "📝 文字": "text",
+                    "✋ 调整/移动": "transform"
+                }
+                
+                real_mode = mode_map[tool]
+                
+                # 构建背景图对象 (Base64)
+                bg_obj = {
+                    "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
+                    "left": 0, "top": 0, "width": int(w * st.session_state['annotate_scale']), 
+                    "height": int(h * st.session_state['annotate_scale']),
+                    "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
+                    "scaleX": 1, "scaleY": 1, "opacity": 1, "visible": True, "backgroundColor": "",
+                    "src": st.session_state['annotate_bg_base64'],
+                    "selectable": False, "evented": False
+                }
+                
+                # 组合初始绘图
+                initial_drawing = {
+                    "version": "4.4.0",
+                    "objects": [bg_obj] + st.session_state['annotate_objects']
+                }
+                
+                # Canvas 参数
+                canvas_result = st_canvas(
+                    fill_color="rgba(0,0,0,0)", # 透明填充
+                    stroke_color=stroke_color,
+                    stroke_width=stroke_width,
+                    background_image=None,
+                    background_color="#eee",
+                    initial_drawing=initial_drawing,
+                    update_streamlit=True,
+                    height=bg_obj['height'],
+                    width=bg_obj['width'],
+                    drawing_mode=real_mode,
+                    key=f"anno_{st.session_state['annotate_key']}",
+                    display_toolbar=True,
+                    # 文字专用参数
+                    initial_text=text_val if tool == "📝 文字" else "Text",
+                )
+                
+                # 捕获用户画的内容
+                if canvas_result.json_data is not None:
+                    current_objs = [o for o in canvas_result.json_data["objects"] if o["type"] != "image"]
+                    # 只有当数量变化或处于非transform模式下内容变化时才更新，避免死循环
+                    # 这里简化为：如果对象列表不同，则更新
+                    # 注意：在 transform 模式下，直接更新可能会抖动，这里我们只在 mode 切换或撤销时强制重绘
+                    # 正常绘画时，我们只记录，不强制刷新
+                    if len(current_objs) != len(st.session_state['annotate_objects']):
+                         st.session_state['annotate_objects'] = current_objs
+                    # 如果是 transform 模式，属性变了也要保存
+                    elif tool == "✋ 调整/移动" and current_objs != st.session_state['annotate_objects']:
+                         st.session_state['annotate_objects'] = current_objs
+
+            if canvas_result.image_data is not None:
+                st.divider()
+                st.write("### 🖼️ 结果下载")
+                result_img = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
+                
+                c_d1, c_d2 = st.columns([1, 1])
+                with c_d1:
+                    st.image(result_img, caption="标注结果预览")
+                with c_d2:
+                    buf = io.BytesIO()
+                    result_img.save(buf, format="PNG")
+                    st.download_button("📥 下载标注后的图片", data=buf.getvalue(), file_name="annotated.png", mime="image/png", type="primary")
