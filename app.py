@@ -47,7 +47,7 @@ if 'annotate_locked' not in st.session_state: st.session_state['annotate_locked'
 if 'annotate_scale' not in st.session_state: st.session_state['annotate_scale'] = 1.0
 if 'annotate_key' not in st.session_state: st.session_state['annotate_key'] = "init_anno"
 if 'annotate_bg_base64' not in st.session_state: st.session_state['annotate_bg_base64'] = None
-if 'annotate_objects' not in st.session_state: st.session_state['annotate_objects'] = []
+if 'annotate_objects' not in st.session_state: st.session_state['annotate_objects'] = [] # 存储画的对象
 if 'show_anno_result' not in st.session_state: st.session_state['show_anno_result'] = False
 
 # === 工具函数 ===
@@ -61,7 +61,7 @@ def convert_image_to_bytes(img, fmt='PNG'):
 def image_to_base64(img):
     buffered = io.BytesIO()
     if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-    img.save(buffered, format="JPEG", quality=70) 
+    img.save(buffered, format="JPEG", quality=70)
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/jpeg;base64,{img_str}"
 
@@ -191,7 +191,7 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "📝 图片标注"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "📝 图片标注 (稳定版)"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -560,7 +560,7 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 标注工具 (最终版) ---
+# --- Tab 6: 标注工具 (最终稳定版) ---
 with tab6:
     st.header("📝 图片标注 (Annotation)")
     st.markdown("像微信截图一样添加：**箭头、线条、方框、文字、画笔**。")
@@ -573,7 +573,7 @@ with tab6:
         st.session_state['annotate_key'] = str(uuid.uuid4())
         st.session_state['annotate_objects'] = []
         st.session_state['annotate_bg_base64'] = None
-        st.session_state['show_anno_result'] = False
+        st.session_state['show_anno_result'] = False 
 
     if anno_file:
         original_img = clean_image(anno_file)
@@ -610,17 +610,16 @@ with tab6:
                 
                 st.divider()
                 
+                # [关键修复]：只在点击按钮时刷新Key
                 if st.button("↩️ 撤销上一步", use_container_width=True, key="undo_anno"):
                     if st.session_state['annotate_objects']:
                         st.session_state['annotate_objects'].pop()
-                        # [关键] 强制刷新Key
-                        st.session_state['annotate_key'] = str(uuid.uuid4()) + f"_{tool}"
+                        st.session_state['annotate_key'] = str(uuid.uuid4())
                         st.rerun()
                 
                 if st.button("🗑️ 清空所有", use_container_width=True, key="clear_anno"):
                     st.session_state['annotate_objects'] = []
-                    # [关键] 强制刷新Key
-                    st.session_state['annotate_key'] = str(uuid.uuid4()) + f"_{tool}"
+                    st.session_state['annotate_key'] = str(uuid.uuid4())
                     st.rerun()
                     
                 if st.button("🔄 解锁重置", use_container_width=True, key="reset_anno"):
@@ -643,7 +642,6 @@ with tab6:
                 }
                 real_mode = mode_map[tool]
                 
-                # 构建背景
                 bg_obj = {
                     "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
                     "left": 0, "top": 0, "width": int(w * st.session_state['annotate_scale']), 
@@ -654,15 +652,14 @@ with tab6:
                     "selectable": False, "evented": False
                 }
                 
+                # [关键修复] 初始数据包含历史对象
                 initial_drawing = {
                     "version": "4.4.0",
                     "objects": [bg_obj] + st.session_state['annotate_objects']
                 }
                 
-                # [核心逻辑]
-                # 为了解决文字工具崩溃问题，我们需要在切换工具时强制重绘组件
-                # 使用 key=f"..._{tool}" 是最稳妥的方法
-                # 为了解决“数据丢失”问题，我们把 saved objects 传回给 initial_drawing
+                # [关键修复] 不再根据 tool 切换 Key，只在撤销时切换
+                # 这保证了切换工具时，组件不会销毁，文字工具不会崩溃
                 canvas_result = st_canvas(
                     fill_color="rgba(0,0,0,0)", 
                     stroke_color=stroke_color,
@@ -674,16 +671,15 @@ with tab6:
                     height=bg_obj['height'],
                     width=bg_obj['width'],
                     drawing_mode=real_mode,
-                    key=f"anno_{st.session_state['annotate_key']}_{tool}", 
+                    key=f"anno_{st.session_state['annotate_key']}", 
                     display_toolbar=True
                 )
                 
-                # 同步状态
+                # [关键修复] 每次操作完，把除了背景图之外的对象存起来
                 if canvas_result.json_data is not None:
                     current_objs = [o for o in canvas_result.json_data["objects"] if o["type"] != "image"]
-                    if len(current_objs) != len(st.session_state['annotate_objects']):
-                         st.session_state['annotate_objects'] = current_objs
-                    elif tool == "✋ 调整/移动" and current_objs != st.session_state['annotate_objects']:
+                    # 只要有变化就存，不管什么模式
+                    if current_objs != st.session_state['annotate_objects']:
                          st.session_state['annotate_objects'] = current_objs
 
             if st.session_state['show_anno_result'] and canvas_result.image_data is not None:
