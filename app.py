@@ -559,7 +559,7 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 标注工具 (New) ---
+# --- Tab 6: 标注工具 (修复崩溃) ---
 with tab6:
     st.header("📝 图片标注 (Annotation)")
     st.markdown("像微信截图一样添加：**箭头、线条、方框、文字、画笔**。")
@@ -598,16 +598,15 @@ with tab6:
             with c_tools:
                 st.success("✅ 开始标注")
                 
-                # 工具选择
                 tool = st.radio("工具", ["🖌️ 画笔", "➖ 直线/箭头", "🔲 矩形框", "🔴 圆形框", "📝 文字", "✋ 调整/移动"])
                 
-                # 样式设置
                 stroke_color = st.color_picker("颜色", "#FF0000")
-                stroke_width = st.slider("粗细", 1, 20, 3)
+                stroke_width = st.slider("粗细/字号", 1, 50, 3)
                 
+                # [核心修复] 先定义默认值，防止变量未定义报错
+                text_val = "Text" 
                 if tool == "📝 文字":
                     text_val = st.text_input("输入文字", "文字标注")
-                    text_size = st.slider("字号", 10, 100, 20)
                 
                 st.divider()
                 
@@ -627,7 +626,6 @@ with tab6:
                     st.rerun()
 
             with c_canvas:
-                # 映射模式
                 mode_map = {
                     "🖌️ 画笔": "freedraw",
                     "➖ 直线/箭头": "line",
@@ -639,7 +637,6 @@ with tab6:
                 
                 real_mode = mode_map[tool]
                 
-                # 构建背景图对象 (Base64)
                 bg_obj = {
                     "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
                     "left": 0, "top": 0, "width": int(w * st.session_state['annotate_scale']), 
@@ -650,15 +647,13 @@ with tab6:
                     "selectable": False, "evented": False
                 }
                 
-                # 组合初始绘图
                 initial_drawing = {
                     "version": "4.4.0",
                     "objects": [bg_obj] + st.session_state['annotate_objects']
                 }
                 
-                # Canvas 参数
                 canvas_result = st_canvas(
-                    fill_color="rgba(0,0,0,0)", # 透明填充
+                    fill_color="rgba(0,0,0,0)", 
                     stroke_color=stroke_color,
                     stroke_width=stroke_width,
                     background_image=None,
@@ -670,20 +665,13 @@ with tab6:
                     drawing_mode=real_mode,
                     key=f"anno_{st.session_state['annotate_key']}",
                     display_toolbar=True,
-                    # 文字专用参数
-                    initial_text=text_val if tool == "📝 文字" else "Text",
+                    initial_text=text_val, # 现在 text_val 永远有值
                 )
                 
-                # 捕获用户画的内容
                 if canvas_result.json_data is not None:
                     current_objs = [o for o in canvas_result.json_data["objects"] if o["type"] != "image"]
-                    # 只有当数量变化或处于非transform模式下内容变化时才更新，避免死循环
-                    # 这里简化为：如果对象列表不同，则更新
-                    # 注意：在 transform 模式下，直接更新可能会抖动，这里我们只在 mode 切换或撤销时强制重绘
-                    # 正常绘画时，我们只记录，不强制刷新
                     if len(current_objs) != len(st.session_state['annotate_objects']):
                          st.session_state['annotate_objects'] = current_objs
-                    # 如果是 transform 模式，属性变了也要保存
                     elif tool == "✋ 调整/移动" and current_objs != st.session_state['annotate_objects']:
                          st.session_state['annotate_objects'] = current_objs
 
