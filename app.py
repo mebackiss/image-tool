@@ -48,6 +48,9 @@ if 'annotate_scale' not in st.session_state: st.session_state['annotate_scale'] 
 if 'annotate_key' not in st.session_state: st.session_state['annotate_key'] = "init_anno"
 if 'annotate_bg_base64' not in st.session_state: st.session_state['annotate_bg_base64'] = None
 if 'annotate_objects' not in st.session_state: st.session_state['annotate_objects'] = []
+# [新增] 记录上一次使用的工具，用于检测切换
+if 'last_tool' not in st.session_state: st.session_state['last_tool'] = "🖌️ 画笔"
+if 'tool_session' not in st.session_state: st.session_state['tool_session'] = str(uuid.uuid4())
 
 # === 工具函数 ===
 
@@ -57,7 +60,6 @@ def convert_image_to_bytes(img, fmt='PNG'):
     else: img.save(buf, format=fmt)
     return buf.getvalue()
 
-# 强制使用 JPEG 压缩，防止大图导致崩坏
 def image_to_base64(img):
     """将PIL图片转换为Base64字符串"""
     buffered = io.BytesIO()
@@ -561,7 +563,7 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 标注工具 (修复后) ---
+# --- Tab 6: 标注工具 (稳定版) ---
 with tab6:
     st.header("📝 图片标注 (Annotation)")
     st.markdown("像微信截图一样添加：**箭头、线条、方框、文字、画笔**。")
@@ -605,22 +607,28 @@ with tab6:
                 stroke_color = st.color_picker("颜色", "#FF0000")
                 stroke_width = st.slider("粗细/字号", 1, 50, 3)
                 
+                # [关键] 检查工具切换，如果切换了，强制刷新 Key
+                if 'last_anno_tool' not in st.session_state: st.session_state['last_anno_tool'] = tool
+                
+                if tool != st.session_state['last_anno_tool']:
+                    st.session_state['last_anno_tool'] = tool
+                    st.session_state['annotate_key'] = str(uuid.uuid4()) # 强制组件重载
+                    st.rerun()
+
                 if tool == "📝 文字":
                     st.info("提示：选中文字工具后，**直接在画布上点击**即可开始打字。")
                 
                 st.divider()
                 
-                # [核心修复] 给所有按钮加上 key，防止ID冲突导致状态混乱
                 if st.button("↩️ 撤销上一步", use_container_width=True, key="undo_anno"):
                     if st.session_state['annotate_objects']:
                         st.session_state['annotate_objects'].pop()
-                        # [关键] 强制变更 key，让画布重绘
-                        st.session_state['annotate_key'] = str(uuid.uuid4()) + f"_{tool}"
+                        st.session_state['annotate_key'] = str(uuid.uuid4())
                         st.rerun()
                 
                 if st.button("🗑️ 清空所有", use_container_width=True, key="clear_anno"):
                     st.session_state['annotate_objects'] = []
-                    st.session_state['annotate_key'] = str(uuid.uuid4()) + f"_{tool}"
+                    st.session_state['annotate_key'] = str(uuid.uuid4())
                     st.rerun()
                     
                 if st.button("🔄 解锁重置", use_container_width=True, key="reset_anno"):
@@ -638,7 +646,7 @@ with tab6:
                 }
                 real_mode = mode_map[tool]
                 
-                # 构建背景图对象
+                # 构建背景
                 bg_obj = {
                     "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
                     "left": 0, "top": 0, "width": int(w * st.session_state['annotate_scale']), 
@@ -649,12 +657,12 @@ with tab6:
                     "selectable": False, "evented": False
                 }
                 
+                # 初始数据 = 背景 + 历史记录
                 initial_drawing = {
                     "version": "4.4.0",
                     "objects": [bg_obj] + st.session_state['annotate_objects']
                 }
                 
-                # [关键修复] key 加上 tool 的后缀，确保切换工具时画布强制刷新
                 canvas_result = st_canvas(
                     fill_color="rgba(0,0,0,0)", 
                     stroke_color=stroke_color,
@@ -666,17 +674,16 @@ with tab6:
                     height=bg_obj['height'],
                     width=bg_obj['width'],
                     drawing_mode=real_mode,
-                    key=f"anno_{st.session_state['annotate_key']}_{tool}",
+                    key=f"anno_{st.session_state['annotate_key']}",
                     display_toolbar=True
                 )
                 
                 if canvas_result.json_data is not None:
+                    # 永远只保存【除了背景图之外】的所有对象
                     current_objs = [o for o in canvas_result.json_data["objects"] if o["type"] != "image"]
                     
-                    # 只有当对象数量变化，或者处于移动模式下内容变化时才更新
-                    if len(current_objs) != len(st.session_state['annotate_objects']):
-                         st.session_state['annotate_objects'] = current_objs
-                    elif tool == "✋ 调整/移动" and current_objs != st.session_state['annotate_objects']:
+                    # 只要有变化就存下来（无论是画了新图，还是移动了旧图）
+                    if current_objs != st.session_state['annotate_objects']:
                          st.session_state['annotate_objects'] = current_objs
 
             if canvas_result.image_data is not None:
