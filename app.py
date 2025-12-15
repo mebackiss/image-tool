@@ -10,6 +10,7 @@ import zipfile
 from streamlit_image_coordinates import streamlit_image_coordinates
 from streamlit_image_comparison import image_comparison
 from streamlit_drawable_canvas import st_canvas
+import numpy as np # 用于图层合并
 
 # === 页面配置 ===
 st.set_page_config(page_title="图片工具箱 Pro Max", layout="wide", page_icon="🛠️")
@@ -39,9 +40,6 @@ if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] = None
 if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] 
-# [关键新增] 冻结的画布状态，防止死循环
-if 'frozen_drawing' not in st.session_state: st.session_state['frozen_drawing'] = None
-if 'last_draw_mode' not in st.session_state: st.session_state['last_draw_mode'] = "✏️ 画框模式"
 
 # === 工具函数 ===
 
@@ -184,7 +182,7 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "✏️ 图片标注"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -351,7 +349,7 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (防抖动终极版) ---
+# --- Tab 4: 自由框选切割 (性能修复版) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
@@ -364,7 +362,6 @@ with tab4:
         st.session_state['canvas_key'] = str(uuid.uuid4())
         st.session_state['canvas_bg_json'] = None
         st.session_state['saved_rects'] = [] 
-        st.session_state['frozen_drawing'] = None
 
     if crop_file:
         original_img = clean_image(crop_file)
@@ -380,74 +377,45 @@ with tab4:
             
             preview_img = original_img.resize((display_w, display_h))
             st.image(preview_img, width=display_w, caption=f"预览效果 ({display_w} x {display_h})")
-            
             st.write("---")
             if st.button("🔒 大小合适了，锁定并开始画框", type="primary"):
                 st.session_state['canvas_locked'] = True
                 st.session_state['locked_scale'] = scale_factor
                 st.session_state['canvas_key'] = str(uuid.uuid4())
-                
                 img_b64 = image_to_base64(preview_img)
                 bg_json = {
                     "version": "4.4.0",
                     "objects": [
                         {
-                            "type": "image",
-                            "version": "4.4.0",
+                            "type": "image", "version": "4.4.0",
                             "originX": "left", "originY": "top", "left": 0, "top": 0,
                             "width": display_w, "height": display_h,
                             "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
-                            "scaleX": 1, "scaleY": 1,
-                            "opacity": 1, "visible": True, "backgroundColor": "",
-                            "src": img_b64,
-                            "selectable": False, "evented": False
+                            "scaleX": 1, "scaleY": 1, "opacity": 1, "visible": True, "backgroundColor": "",
+                            "src": img_b64, "selectable": False, "evented": False
                         }
                     ]
                 }
                 st.session_state['canvas_bg_json'] = bg_json
-                # [核心] 初始化冻结的输入状态
-                st.session_state['frozen_drawing'] = bg_json
                 st.rerun()
 
         else:
             c_tools, c_canvas = st.columns([1, 3])
-            
             with c_tools:
                 st.success("✅ 画板已就绪")
                 draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
-                
-                # [核心] 监听模式切换，模式切换时强制更新输入
-                if draw_mode != st.session_state.get('last_draw_mode'):
-                    st.session_state['last_draw_mode'] = draw_mode
-                    # 切换模式时，将当前已画的框同步进 input，并刷新key
-                    st.session_state['frozen_drawing'] = {
-                        "version": "4.4.0",
-                        "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
-                    }
-                    st.session_state['canvas_key'] = str(uuid.uuid4())
-                    st.rerun()
-
                 st.write("---")
                 if st.button("↩️ 撤销上一步", use_container_width=True):
                     if st.session_state['saved_rects']:
                         st.session_state['saved_rects'].pop()
-                        # 撤销时，更新输入，刷新key
-                        st.session_state['frozen_drawing'] = {
-                            "version": "4.4.0",
-                            "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
-                        }
                         st.session_state['canvas_key'] = str(uuid.uuid4()) 
                         st.rerun()
                     else:
                         st.toast("没有可以撤销的操作")
-
                 if st.button("🗑️ 清空所有框", use_container_width=True):
                     st.session_state['saved_rects'] = []
-                    # 清空时，输入重置为纯背景
-                    st.session_state['frozen_drawing'] = st.session_state['canvas_bg_json']
                     st.session_state['canvas_key'] = str(uuid.uuid4())
                     st.rerun()
-
                 st.write("---")
                 if st.button("🔄 解锁重置", use_container_width=True):
                     st.session_state['canvas_locked'] = False
@@ -457,29 +425,21 @@ with tab4:
                 if st.session_state['canvas_bg_json'] is None:
                     st.error("状态丢失，请解锁重试")
                     st.stop()
-                    
+                
                 bg_w = st.session_state['canvas_bg_json']['objects'][0]['width']
                 bg_h = st.session_state['canvas_bg_json']['objects'][0]['height']
-
+                current_drawing = {
+                    "version": "4.4.0",
+                    "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
+                }
                 real_mode = "rect" if "画框" in draw_mode else "transform"
-
                 canvas_result = st_canvas(
-                    fill_color="rgba(255, 165, 0, 0.3)",
-                    stroke_color="#FF0000",
-                    stroke_width=2,
-                    background_image=None,
-                    # [核心修复] 使用冻结的输入，除非点击按钮否则永远不更新这个参数
-                    initial_drawing=st.session_state['frozen_drawing'],
-                    update_streamlit=True,
-                    height=bg_h,
-                    width=bg_w,
-                    drawing_mode=real_mode,
-                    key=f"canvas_{st.session_state['canvas_key']}",
-                    display_toolbar=True
+                    fill_color="rgba(255, 165, 0, 0.3)", stroke_color="#FF0000", stroke_width=2,
+                    background_image=None, initial_drawing=current_drawing,
+                    update_streamlit=True, height=bg_h, width=bg_w,
+                    drawing_mode=real_mode, key=f"canvas_{st.session_state['canvas_key']}", display_toolbar=True
                 )
-
                 if canvas_result.json_data is not None:
-                    # 只读取，不反向写入 initial_drawing
                     current_objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
                     if current_objects != st.session_state['saved_rects']:
                         st.session_state['saved_rects'] = current_objects
@@ -487,7 +447,6 @@ with tab4:
             st.divider()
             count = len(st.session_state['saved_rects'])
             st.write(f"当前已选中 **{count}** 个区域")
-            
             if count > 0:
                 if st.button(f"✂️ 切割并下载这 {count} 张图", type="primary"):
                     zip_buffer = io.BytesIO()
@@ -498,7 +457,6 @@ with tab4:
                             real_y = int(obj["top"] / scale)
                             real_w = int((obj["width"] * obj.get("scaleX", 1)) / scale)
                             real_h = int((obj["height"] * obj.get("scaleY", 1)) / scale)
-                            
                             if real_w > 0 and real_h > 0:
                                 box = (real_x, real_y, real_x+real_w, real_y+real_h)
                                 try:
@@ -507,15 +465,12 @@ with tab4:
                                     cropped.save(img_byte, format='PNG')
                                     zf.writestr(f"crop_{i+1}.png", img_byte.getvalue())
                                 except: pass
-                                    
                     st.download_button("📦 下载ZIP", zip_buffer.getvalue(), "free_crops.zip", "application/zip")
 
-# --- Tab 5: 自由画布/拖拽拼图 ---
+# --- Tab 5: 自由画布 ---
 with tab5:
     st.header("🎨 自由画布 (Free Canvas)")
-    st.markdown("像PPT一样**拖拽、缩放、旋转**图片，自由组合。")
     free_files = st.file_uploader("上传素材图片", type=['png','jpg','jpeg','webp'], accept_multiple_files=True, key="free_canvas_up")
-    
     if free_files:
         c1, c2, c3 = st.columns(3)
         cw = c1.number_input("画布宽度", 500, 3000, 800)
@@ -548,8 +503,6 @@ with tab5:
             update_streamlit=True, height=ch, width=cw, drawing_mode="transform",
             initial_drawing=st.session_state['canvas_json'], key="free_canvas_board", display_toolbar=True
         )
-        st.caption("提示：点击图片选中，Delete键删除，拖动边框缩放/旋转。")
-        
         if canvas_result.image_data is not None:
             result_image = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
             st.divider()
@@ -559,3 +512,115 @@ with tab5:
                 buf = io.BytesIO()
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
+
+# --- Tab 6: 图片标注 (新功能) ---
+with tab6:
+    st.header("✏️ 图片标注 (箭头/文字)")
+    st.markdown("类似微信截图：画红框、直线(模拟箭头)、写字。")
+    
+    file = st.file_uploader("上传图片", type=['png','jpg','jpeg','webp'], key="anno_up")
+    
+    if file:
+        img = clean_image(file)
+        
+        # 1. 预处理：缩小显示以提高性能，但保留原图比例
+        max_display_width = 1000
+        if img.width > max_display_width:
+            display_scale = max_display_width / img.width
+            display_w = max_display_width
+            display_h = int(img.height * display_scale)
+            # 缩放用于显示
+            work_img = img.resize((display_w, display_h))
+        else:
+            display_scale = 1.0
+            work_img = img
+            display_w, display_h = img.width, img.height
+
+        # 2. 工具栏
+        c_mode, c_color, c_width = st.columns([2, 1, 1])
+        
+        with c_mode:
+            # 映射中文模式到 st_canvas 的参数
+            mode_map = {
+                "⬜ 矩形框": "rect",
+                "📏 直线": "line",
+                "🔤 文字": "text",
+                "🖊️ 自由画笔": "freedraw",
+                "✋ 调整/移动": "transform"
+            }
+            selected_mode_cn = st.radio("选择工具", list(mode_map.keys()), horizontal=True)
+            drawing_mode = mode_map[selected_mode_cn]
+            
+            text_val = ""
+            if drawing_mode == "text":
+                text_val = st.text_input("在此输入要添加的文字", "在此输入文字")
+
+        with c_color:
+            stroke_color = st.color_picker("颜色", "#FF0000")
+        
+        with c_width:
+            stroke_width = st.slider("粗细", 1, 20, 3)
+
+        # 3. Canvas
+        # 使用 Base64 背景图技术，保证稳定性
+        bg_b64 = image_to_base64(work_img)
+        
+        # 实时渲染
+        canvas_result = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",  # 填充透明
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            background_image=None, # 不直接传对象
+            background_color="#eee",
+            # 使用 background_image 参数其实在某些版本支持 Base64，但为了稳妥，
+            # 我们这里用 initial_drawing 的方式注入背景（和 Tab 4 一样）
+            # 或者，因为这里是单图编辑，st_canvas 的 background_image 参数如果是 Image 对象在本地没问题，
+            # 但为了云端兼容，我们尝试用 Base64 字符串传给 background_image 参数（新版库支持）
+            # 如果不支持，就回退到 JSON 注入法。
+            # 这里先尝试最简单的：不传 background_image，而是在 Streamlit 层面合并。
+            # 不，那样没有实时反馈。
+            # 我们用 Tab 4 验证过的 JSON 注入法最稳。
+            initial_drawing={
+                "version": "4.4.0",
+                "objects": [{
+                    "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
+                    "left": 0, "top": 0, "width": display_w, "height": display_h,
+                    "opacity": 1, "visible": True, "src": bg_b64,
+                    "selectable": False, "evented": False
+                }]
+            },
+            update_streamlit=True,
+            height=display_h,
+            width=display_w,
+            drawing_mode=drawing_mode,
+            key="anno_canvas",
+            text_value=text_val, # 文字模式专用
+            display_toolbar=True
+        )
+
+        # 4. 合成下载
+        if canvas_result.image_data is not None:
+            # 拿到的是 RGBA 的图层（只有画的东西，背景透明）
+            fg_img = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
+            
+            # 合并：底图 + 画的图
+            # 注意：底图是 work_img (缩放过的)
+            combined = work_img.convert("RGBA")
+            combined.paste(fg_img, (0, 0), fg_img)
+            
+            st.divider()
+            c_d1, c_d2 = st.columns([2, 1])
+            with c_d1:
+                st.image(combined, caption="效果预览", use_column_width=True)
+            with c_d2:
+                # 转换回 RGB 下载
+                final_rgb = combined.convert("RGB")
+                buf = io.BytesIO()
+                final_rgb.save(buf, format="JPEG", quality=95)
+                st.download_button(
+                    label="📥 保存标注后的图片",
+                    data=buf.getvalue(),
+                    file_name="annotated_image.jpg",
+                    mime="image/jpeg",
+                    type="primary"
+                )
