@@ -48,9 +48,7 @@ if 'annotate_scale' not in st.session_state: st.session_state['annotate_scale'] 
 if 'annotate_key' not in st.session_state: st.session_state['annotate_key'] = "init_anno"
 if 'annotate_bg_base64' not in st.session_state: st.session_state['annotate_bg_base64'] = None
 if 'annotate_objects' not in st.session_state: st.session_state['annotate_objects'] = []
-# [新增] 记录上一次使用的工具，用于检测切换
-if 'last_tool' not in st.session_state: st.session_state['last_tool'] = "🖌️ 画笔"
-if 'tool_session' not in st.session_state: st.session_state['tool_session'] = str(uuid.uuid4())
+if 'show_anno_result' not in st.session_state: st.session_state['show_anno_result'] = False # 控制结果显示
 
 # === 工具函数 ===
 
@@ -194,7 +192,7 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "📝 图片标注"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "📝 图片标注 (优化版)"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -563,7 +561,7 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 标注工具 (稳定版) ---
+# --- Tab 6: 标注工具 (最终版) ---
 with tab6:
     st.header("📝 图片标注 (Annotation)")
     st.markdown("像微信截图一样添加：**箭头、线条、方框、文字、画笔**。")
@@ -576,6 +574,7 @@ with tab6:
         st.session_state['annotate_key'] = str(uuid.uuid4())
         st.session_state['annotate_objects'] = []
         st.session_state['annotate_bg_base64'] = None
+        st.session_state['show_anno_result'] = False # 重置结果显示
 
     if anno_file:
         original_img = clean_image(anno_file)
@@ -607,16 +606,16 @@ with tab6:
                 stroke_color = st.color_picker("颜色", "#FF0000")
                 stroke_width = st.slider("粗细/字号", 1, 50, 3)
                 
-                # [关键] 检查工具切换，如果切换了，强制刷新 Key
+                # 检查工具切换，强制刷新
                 if 'last_anno_tool' not in st.session_state: st.session_state['last_anno_tool'] = tool
                 
                 if tool != st.session_state['last_anno_tool']:
                     st.session_state['last_anno_tool'] = tool
-                    st.session_state['annotate_key'] = str(uuid.uuid4()) # 强制组件重载
+                    st.session_state['annotate_key'] = str(uuid.uuid4())
                     st.rerun()
 
                 if tool == "📝 文字":
-                    st.info("提示：选中文字工具后，**直接在画布上点击**即可开始打字。")
+                    st.info("选中文字工具后，**点击画布**即可输入。")
                 
                 st.divider()
                 
@@ -633,7 +632,14 @@ with tab6:
                     
                 if st.button("🔄 解锁重置", use_container_width=True, key="reset_anno"):
                     st.session_state['annotate_locked'] = False
+                    st.session_state['show_anno_result'] = False
                     st.rerun()
+                
+                st.write("---")
+                # [新增] 完成按钮
+                if st.button("✅ 完成标注 & 生成预览", type="primary", use_container_width=True):
+                    st.session_state['show_anno_result'] = True
+                    # 这里不需要 rerurn，代码会继续往下执行显示结果
 
             with c_canvas:
                 mode_map = {
@@ -646,7 +652,6 @@ with tab6:
                 }
                 real_mode = mode_map[tool]
                 
-                # 构建背景
                 bg_obj = {
                     "type": "image", "version": "4.4.0", "originX": "left", "originY": "top",
                     "left": 0, "top": 0, "width": int(w * st.session_state['annotate_scale']), 
@@ -657,12 +662,12 @@ with tab6:
                     "selectable": False, "evented": False
                 }
                 
-                # 初始数据 = 背景 + 历史记录
                 initial_drawing = {
                     "version": "4.4.0",
                     "objects": [bg_obj] + st.session_state['annotate_objects']
                 }
                 
+                # [关键修正] 删除了 initial_text 参数
                 canvas_result = st_canvas(
                     fill_color="rgba(0,0,0,0)", 
                     stroke_color=stroke_color,
@@ -674,27 +679,30 @@ with tab6:
                     height=bg_obj['height'],
                     width=bg_obj['width'],
                     drawing_mode=real_mode,
-                    key=f"anno_{st.session_state['annotate_key']}",
+                    key=f"anno_{st.session_state['annotate_key']}_{tool}",
                     display_toolbar=True
                 )
                 
+                # 状态更新
                 if canvas_result.json_data is not None:
-                    # 永远只保存【除了背景图之外】的所有对象
                     current_objs = [o for o in canvas_result.json_data["objects"] if o["type"] != "image"]
-                    
-                    # 只要有变化就存下来（无论是画了新图，还是移动了旧图）
-                    if current_objs != st.session_state['annotate_objects']:
+                    if len(current_objs) != len(st.session_state['annotate_objects']):
+                         st.session_state['annotate_objects'] = current_objs
+                    elif tool == "✋ 调整/移动" and current_objs != st.session_state['annotate_objects']:
                          st.session_state['annotate_objects'] = current_objs
 
-            if canvas_result.image_data is not None:
+            # [新增] 只有点击了完成按钮，才显示结果
+            if st.session_state['show_anno_result'] and canvas_result.image_data is not None:
                 st.divider()
-                st.write("### 🖼️ 结果下载")
+                st.success("🎉 标注已完成，请下载")
+                
+                # 渲染结果
                 result_img = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
                 
                 c_d1, c_d2 = st.columns([1, 1])
                 with c_d1:
-                    st.image(result_img, caption="标注结果预览")
+                    st.image(result_img, caption="最终效果预览")
                 with c_d2:
                     buf = io.BytesIO()
                     result_img.save(buf, format="PNG")
-                    st.download_button("📥 下载标注后的图片", data=buf.getvalue(), file_name="annotated.png", mime="image/png", type="primary")
+                    st.download_button("📥 下载标注后的图片", data=buf.getvalue(), file_name="annotated.png", mime="image/png", type="primary", use_container_width=True)
