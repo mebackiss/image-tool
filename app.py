@@ -4,6 +4,8 @@ import os
 import math
 import base64
 import json
+import numpy as np # [新增] 处理矩阵
+import cv2         # [新增] OpenCV 图像处理
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 import io
 import zipfile
@@ -39,9 +41,11 @@ if 'locked_scale' not in st.session_state: st.session_state['locked_scale'] = 1.
 if 'canvas_key' not in st.session_state: st.session_state['canvas_key'] = "init"
 if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] = None
 if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] 
-# [关键新增] 冻结的画布状态，防止死循环
 if 'frozen_drawing' not in st.session_state: st.session_state['frozen_drawing'] = None
 if 'last_draw_mode' not in st.session_state: st.session_state['last_draw_mode'] = "✏️ 画框模式"
+
+# Tab 6 (去水印) 专用状态
+if 'watermark_result' not in st.session_state: st.session_state['watermark_result'] = None
 
 # === 工具函数 ===
 
@@ -181,10 +185,36 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
             
     return result
 
+# [新增] 去水印核心算法
+def inpaint_image(img_pil, mask_pil):
+    """
+    使用 OpenCV Telea 算法进行图像修复
+    img_pil: 原始图片 (PIL)
+    mask_pil: 蒙版图片 (PIL, 只有黑白)
+    """
+    # 1. 转换格式 PIL -> OpenCV (numpy)
+    img_np = np.array(img_pil)
+    
+    # 2. 处理蒙版
+    # 确保蒙版是单通道（灰度），并且大小与原图一致
+    mask_resized = mask_pil.resize(img_pil.size)
+    mask_np = np.array(mask_resized.convert("L"))
+    
+    # 3. 二值化蒙版 (确保只有黑白，白色为需要修复区域)
+    # 画布返回的通常是带透明度的，涂抹处可能不是纯白
+    _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
+    
+    # 4. 执行修复 (Radius=3, Method=Telea)
+    # cv2.INPAINT_TELEA 或 cv2.INPAINT_NS
+    inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
+    
+    # 5. 转回 PIL
+    return Image.fromarray(inpainted_np)
+
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧩 智能拼图", "🔪 参考线切图", "💎 高清修复", "🔳 自由框选切割", "🎨 自由画布", "💧 魔法去水印"])
 
 # --- Tab 1: 拼图 ---
 with tab1:
@@ -405,7 +435,6 @@ with tab4:
                     ]
                 }
                 st.session_state['canvas_bg_json'] = bg_json
-                # [核心] 初始化冻结的输入状态
                 st.session_state['frozen_drawing'] = bg_json
                 st.rerun()
 
@@ -416,10 +445,8 @@ with tab4:
                 st.success("✅ 画板已就绪")
                 draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
                 
-                # [核心] 监听模式切换，模式切换时强制更新输入
                 if draw_mode != st.session_state.get('last_draw_mode'):
                     st.session_state['last_draw_mode'] = draw_mode
-                    # 切换模式时，将当前已画的框同步进 input，并刷新key
                     st.session_state['frozen_drawing'] = {
                         "version": "4.4.0",
                         "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
@@ -431,7 +458,6 @@ with tab4:
                 if st.button("↩️ 撤销上一步", use_container_width=True):
                     if st.session_state['saved_rects']:
                         st.session_state['saved_rects'].pop()
-                        # 撤销时，更新输入，刷新key
                         st.session_state['frozen_drawing'] = {
                             "version": "4.4.0",
                             "objects": st.session_state['canvas_bg_json']['objects'] + st.session_state['saved_rects']
@@ -443,7 +469,6 @@ with tab4:
 
                 if st.button("🗑️ 清空所有框", use_container_width=True):
                     st.session_state['saved_rects'] = []
-                    # 清空时，输入重置为纯背景
                     st.session_state['frozen_drawing'] = st.session_state['canvas_bg_json']
                     st.session_state['canvas_key'] = str(uuid.uuid4())
                     st.rerun()
@@ -468,7 +493,6 @@ with tab4:
                     stroke_color="#FF0000",
                     stroke_width=2,
                     background_image=None,
-                    # [核心修复] 使用冻结的输入，除非点击按钮否则永远不更新这个参数
                     initial_drawing=st.session_state['frozen_drawing'],
                     update_streamlit=True,
                     height=bg_h,
@@ -479,7 +503,6 @@ with tab4:
                 )
 
                 if canvas_result.json_data is not None:
-                    # 只读取，不反向写入 initial_drawing
                     current_objects = [obj for obj in canvas_result.json_data["objects"] if obj["type"] == "rect"]
                     if current_objects != st.session_state['saved_rects']:
                         st.session_state['saved_rects'] = current_objects
@@ -559,3 +582,97 @@ with tab5:
                 buf = io.BytesIO()
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
+
+# --- Tab 6: 魔法去水印 ---
+with tab6:
+    st.header("💧 魔法去水印 (Inpainting)")
+    st.caption("使用画笔涂抹需要去除的区域，算法会自动填补。")
+    
+    watermark_file = st.file_uploader("上传需要去水印的图片", type=['png','jpg','jpeg','webp'], key="wm_up")
+    
+    if watermark_file:
+        # 重置状态
+        if 'wm_filename' not in st.session_state or st.session_state.wm_filename != watermark_file.name:
+            st.session_state.wm_filename = watermark_file.name
+            st.session_state['watermark_result'] = None
+            
+        original_img = clean_image(watermark_file)
+        
+        # 布局：左边操作，右边结果
+        wc1, wc2 = st.columns([1, 1])
+        
+        with wc1:
+            st.write("🖌️ **请涂抹水印区域：**")
+            
+            # 缩放以适应屏幕，防止画布过大卡顿
+            # 限制画布最大显示宽度为 700px
+            max_canvas_width = 700
+            scale_factor = 1.0
+            if original_img.width > max_canvas_width:
+                scale_factor = max_canvas_width / original_img.width
+            
+            display_w = int(original_img.width * scale_factor)
+            display_h = int(original_img.height * scale_factor)
+            
+            display_img = original_img.resize((display_w, display_h))
+            
+            # 画笔大小
+            stroke_width = st.slider("画笔大小", 1, 50, 15)
+            
+            canvas_wm = st_canvas(
+                fill_color="rgba(255, 0, 0, 0.3)", # 填充色
+                stroke_color="#FF0000",            # 笔触颜色 (红色醒目)
+                stroke_width=stroke_width,
+                background_image=display_img,
+                update_streamlit=True,
+                height=display_h,
+                width=display_w,
+                drawing_mode="freedraw", # 自由涂抹模式
+                key="canvas_watermark",
+                display_toolbar=True
+            )
+            
+            if st.button("🪄 开始去除", type="primary"):
+                if canvas_wm.image_data is not None:
+                    with st.spinner("正在施展魔法..."):
+                        # 获取蒙版 (RGBA)
+                        mask_data = canvas_wm.image_data
+                        mask_pil = Image.fromarray(mask_data.astype('uint8'), 'RGBA')
+                        
+                        # 执行修复
+                        # 注意：需要把缩小后的蒙版放大回原图尺寸，或者把原图缩小
+                        # 这里我们选择把蒙版放大，以保持原图高清
+                        restored = inpaint_image(original_img, mask_pil)
+                        st.session_state['watermark_result'] = restored
+                else:
+                    st.warning("请先涂抹需要去除的区域")
+
+        with wc2:
+            st.write("👁️ **效果预览：**")
+            if st.session_state['watermark_result']:
+                # 使用对比组件
+                # 注意：对比组件需要两图尺寸一致，我们把原图传进去对比
+                res_img = st.session_state['watermark_result']
+                
+                # 为了显示效果，缩放一下对比图
+                disp_res = res_img.resize((display_w, display_h))
+                
+                image_comparison(
+                    img1=display_img,
+                    img2=disp_res,
+                    label1="原图",
+                    label2="去水印后",
+                    width=display_w,
+                    show_labels=True,
+                    in_memory=True
+                )
+                
+                st.download_button(
+                    label="📥 下载处理后的高清大图",
+                    data=convert_image_to_bytes(res_img),
+                    file_name="watermark_removed.png",
+                    mime="image/png",
+                    type="primary"
+                )
+            else:
+                st.info("等待处理...")
