@@ -46,7 +46,10 @@ if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = []
 if 'wm_locked' not in st.session_state: st.session_state['wm_locked'] = False
 if 'wm_scale' not in st.session_state: st.session_state['wm_scale'] = 1.0
 if 'wm_key' not in st.session_state: st.session_state['wm_key'] = "wm_init"
+if 'wm_bg_json' not in st.session_state: st.session_state['wm_bg_json'] = None
 if 'watermark_result' not in st.session_state: st.session_state['watermark_result'] = None
+# 用来存储去水印的框
+if 'wm_rects' not in st.session_state: st.session_state['wm_rects'] = []
 
 # === 工具函数 ===
 
@@ -186,15 +189,10 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
     return result
 
 def inpaint_image(img_pil, mask_pil):
-    # 核心算法：确保传入的是 RGB 原图 和 L (灰度) 蒙版
     img_np = np.array(img_pil.convert("RGB"))
     mask_resized = mask_pil.resize(img_pil.size)
     mask_np = np.array(mask_resized.convert("L"))
-    
-    # 二值化，提取白色区域作为 Mask
     _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
-    
-    # 使用 OpenCV 修复
     inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
     return Image.fromarray(inpainted_np)
 
@@ -368,12 +366,11 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 (JSON Background Fix) ---
+# --- Tab 4: 自由框选切割 ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
-    # 切换图片时重置
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
@@ -408,15 +405,10 @@ with tab4:
                     "version": "4.4.0",
                     "objects": [
                         {
-                            "type": "image",
-                            "version": "4.4.0",
-                            "originX": "left", "originY": "top", "left": 0, "top": 0,
-                            "width": display_w, "height": display_h,
-                            "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
-                            "scaleX": 1, "scaleY": 1,
-                            "opacity": 1, "visible": True, "backgroundColor": "",
-                            "src": img_b64,
-                            "selectable": False, "evented": False
+                            "type": "image", "version": "4.4.0", "originX": "left", "originY": "top", "left": 0, "top": 0,
+                            "width": display_w, "height": display_h, "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
+                            "scaleX": 1, "scaleY": 1, "opacity": 1, "visible": True, "backgroundColor": "",
+                            "src": img_b64, "selectable": False, "evented": False
                         }
                     ]
                 }
@@ -429,6 +421,13 @@ with tab4:
             with c_tools:
                 st.success("✅ 画板已就绪")
                 draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
+                
+                # 模式切换自动刷新key
+                if draw_mode != st.session_state.get('last_draw_mode_tab4'):
+                    st.session_state['last_draw_mode_tab4'] = draw_mode
+                    st.session_state['canvas_key'] = str(uuid.uuid4())
+                    st.rerun()
+
                 st.write("---")
                 if st.button("↩️ 撤销上一步", use_container_width=True):
                     if st.session_state['saved_rects']:
@@ -558,26 +557,29 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 魔法去水印 (Fixed) ---
+# --- Tab 6: 魔法去水印 (Fixed - Box Selection Only) ---
 with tab6:
     st.header("💧 魔法去水印 (Inpainting)")
-    st.caption("使用画笔涂抹或框选需要去除的区域，算法会自动填补。")
+    st.caption("框选需要去除的水印区域，算法会自动填补。")
     
     watermark_file = st.file_uploader("上传需要去水印的图片", type=['png','jpg','jpeg','webp'], key="wm_up")
     
-    if watermark_file:
-        if 'wm_filename' not in st.session_state or st.session_state.wm_filename != watermark_file.name:
-            st.session_state.wm_filename = watermark_file.name
-            st.session_state.wm_locked = False
-            st.session_state.wm_scale = 1.0
-            st.session_state.wm_key = str(uuid.uuid4())
-            st.session_state.watermark_result = None
+    # 状态管理
+    if watermark_file and ('wm_filename' not in st.session_state or st.session_state.wm_filename != watermark_file.name):
+        st.session_state.wm_filename = watermark_file.name
+        st.session_state.wm_locked = False
+        st.session_state.wm_scale = 1.0
+        st.session_state.wm_key = str(uuid.uuid4())
+        st.session_state.wm_bg_json = None
+        st.session_state.watermark_result = None
+        st.session_state.wm_rects = [] # 存储框
 
+    if watermark_file:
         original_img = clean_image(watermark_file)
         w, h = original_img.size
         
         if not st.session_state.wm_locked:
-            st.info("👇 **第一步：请先拖动滑块，调整显示大小**")
+            st.info("👇 **第一步：调整图片大小**")
             default_zoom = 50 if w > 800 else 100
             wm_zoom = st.slider("🔍 显示缩放 (%)", 10, 100, default_zoom, key="wm_zoom_slider")
             
@@ -586,10 +588,7 @@ with tab6:
             disp_h = int(h * scale)
             
             preview_img = original_img.resize((disp_w, disp_h))
-            
-            # [核心修复] 使用临时文件落地策略，最稳定
-            preview_img.save("temp_wm_bg.png", format="PNG")
-            
+            # 强制指定 width
             st.image(preview_img, width=disp_w, caption=f"预览效果 ({disp_w} x {disp_h})")
             
             st.write("---")
@@ -597,90 +596,136 @@ with tab6:
                 st.session_state.wm_locked = True
                 st.session_state.wm_scale = scale
                 st.session_state.wm_key = str(uuid.uuid4())
+                
+                # 使用 JSON Base64 背景 (解决白屏)
+                img_b64 = image_to_base64(preview_img)
+                bg_json = {
+                    "version": "4.4.0",
+                    "objects": [{
+                        "type": "image", "version": "4.4.0", "originX": "left", "originY": "top", "left": 0, "top": 0,
+                        "width": disp_w, "height": disp_h, "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
+                        "scaleX": 1, "scaleY": 1, "opacity": 1, "visible": True, "backgroundColor": "",
+                        "src": img_b64, "selectable": False, "evented": False
+                    }]
+                }
+                st.session_state.wm_bg_json = bg_json
                 st.rerun()
                 
         else:
+            # === 第二步：框选 ===
             c_tools, c_canvas = st.columns([1, 2])
             
             with c_tools:
-                mode = st.radio("模式选择", ["🖌️ 画笔涂抹", "🔳 框选消除"])
-                draw_mode = "freedraw" if "画笔" in mode else "rect"
+                st.success("✅ 请在右侧框选")
                 
-                stroke_width = 15
-                if draw_mode == "freedraw":
-                    stroke_width = st.slider("画笔大小", 1, 50, 15)
+                draw_mode = st.radio("模式", ["🔳 框选消除", "✋ 调整选区"], horizontal=False)
                 
+                # 切换模式刷新
+                if draw_mode != st.session_state.get('last_wm_mode'):
+                    st.session_state['last_wm_mode'] = draw_mode
+                    st.session_state.wm_key = str(uuid.uuid4())
+                    st.rerun()
+
                 st.write("---")
-                # 切换模式时强制刷新 Key
-                current_mode_key = f"wm_canvas_{st.session_state.wm_key}_{draw_mode}"
+                if st.button("↩️ 撤销选区", use_container_width=True):
+                    if st.session_state.wm_rects:
+                        st.session_state.wm_rects.pop()
+                        st.session_state.wm_key = str(uuid.uuid4())
+                        st.rerun()
                 
-                if st.button("🔄 重新调整大小", use_container_width=True):
+                if st.button("🗑️ 清空选区", use_container_width=True):
+                    st.session_state.wm_rects = []
+                    st.session_state.wm_key = str(uuid.uuid4())
+                    st.rerun()
+
+                st.write("---")
+                if st.button("🔄 解锁重置", use_container_width=True):
                     st.session_state.wm_locked = False
                     st.rerun()
                     
                 st.divider()
-                if st.button("🪄 开始魔法消除", type="primary", use_container_width=True):
-                    # 触发逻辑直接写在这里
-                    st.session_state['trigger_inpaint_now'] = True
+                if st.button("🪄 开始消除", type="primary", use_container_width=True):
+                    st.session_state['trigger_inpaint'] = True
             
             with c_canvas:
-                if not os.path.exists("temp_wm_bg.png"):
-                    st.error("缓存文件丢失，请重置")
+                if st.session_state.wm_bg_json is None:
+                    st.error("状态丢失")
                     st.stop()
                     
-                bg_img_disk = Image.open("temp_wm_bg.png")
+                bg_w = st.session_state.wm_bg_json['objects'][0]['width']
+                bg_h = st.session_state.wm_bg_json['objects'][0]['height']
                 
-                fill_color = "rgba(255, 0, 0, 0.3)" if draw_mode == "rect" else "rgba(255, 0, 0, 0.5)"
+                # 组合 Drawing
+                current_drawing = {
+                    "version": "4.4.0",
+                    "objects": st.session_state.wm_bg_json['objects'] + st.session_state.wm_rects
+                }
                 
-                # [关键] 使用 background_image 参数，保证 image_data 只包含画笔内容（蒙版）
+                real_mode = "rect" if "框选" in draw_mode else "transform"
+                
                 canvas_wm = st_canvas(
-                    fill_color=fill_color,
+                    fill_color="rgba(255, 0, 0, 0.4)",
                     stroke_color="#FF0000",
-                    stroke_width=stroke_width,
-                    background_image=bg_img_disk,
+                    stroke_width=2,
+                    background_image=None, # 不传这个参数
+                    initial_drawing=current_drawing, # 用 JSON
                     update_streamlit=True,
-                    height=bg_img_disk.height,
-                    width=bg_img_disk.width,
-                    drawing_mode=draw_mode,
-                    key=current_mode_key,
+                    height=bg_h,
+                    width=bg_w,
+                    drawing_mode=real_mode,
+                    key=f"wm_canvas_{st.session_state.wm_key}",
                     display_toolbar=True
                 )
                 
-                if st.session_state.get('trigger_inpaint_now', False):
-                    st.session_state['trigger_inpaint_now'] = False # 复位
+                # 同步数据
+                if canvas_wm.json_data is not None:
+                    # 过滤掉背景 (image)
+                    rects = [obj for obj in canvas_wm.json_data["objects"] if obj["type"] == "rect"]
+                    if rects != st.session_state.wm_rects:
+                        st.session_state.wm_rects = rects
+
+                # 执行处理
+                if st.session_state.get('trigger_inpaint', False):
+                    st.session_state['trigger_inpaint'] = False
                     
-                    if canvas_wm.image_data is not None:
-                        with st.spinner("正在计算..."):
-                            # 获取蒙版 (RGBA)
-                            mask_data = canvas_wm.image_data
-                            # 提取 Alpha 通道作为蒙版
-                            alpha_channel = mask_data[:, :, 3]
-                            mask_pil = Image.fromarray(alpha_channel)
+                    if len(st.session_state.wm_rects) > 0:
+                        with st.spinner("正在智能计算..."):
+                            # 1. 构造蒙版图像 (黑底白框)
+                            # 使用原图尺寸
+                            mask_pil = Image.new("L", original_img.size, 0)
+                            draw = ImageDraw.Draw(mask_pil)
                             
-                            # 修复
+                            scale = st.session_state.wm_scale
+                            
+                            for obj in st.session_state.wm_rects:
+                                # 坐标还原到原图
+                                rx = int(obj["left"] / scale)
+                                ry = int(obj["top"] / scale)
+                                rw = int((obj["width"] * obj.get("scaleX", 1)) / scale)
+                                rh = int((obj["height"] * obj.get("scaleY", 1)) / scale)
+                                
+                                draw.rectangle([rx, ry, rx+rw, ry+rh], fill=255)
+                            
+                            # 2. 调用 OpenCV 修复
                             restored = inpaint_image(original_img, mask_pil)
                             st.session_state['watermark_result'] = restored
                             st.rerun()
                     else:
-                        st.warning("请先涂抹区域")
+                        st.warning("请先框选区域")
 
+            # 结果展示
             if st.session_state['watermark_result']:
                 st.divider()
                 st.success("✨ 处理完成！")
                 res_img = st.session_state['watermark_result']
                 
-                # 缩放对比图
-                disp_w, disp_h = bg_img_disk.size
-                disp_res = res_img.resize((disp_w, disp_h))
+                # 对比显示
+                disp_res = res_img.resize((bg_w, bg_h))
+                disp_orig = original_img.resize((bg_w, bg_h))
                 
                 image_comparison(
-                    img1=bg_img_disk,
-                    img2=disp_res,
-                    label1="原图",
-                    label2="去水印后",
-                    width=disp_w,
-                    show_labels=True,
-                    in_memory=True
+                    img1=disp_orig, img2=disp_res, label1="原图", label2="去水印后",
+                    width=bg_w, show_labels=True, in_memory=True
                 )
                 
                 st.download_button("📥 下载处理后的图片", convert_image_to_bytes(res_img), "watermark_removed.png", "image/png", type="primary")
