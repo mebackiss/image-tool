@@ -43,12 +43,8 @@ if 'canvas_bg_json' not in st.session_state: st.session_state['canvas_bg_json'] 
 if 'saved_rects' not in st.session_state: st.session_state['saved_rects'] = [] 
 
 # Tab 6 (去水印) 专用
-if 'wm_locked' not in st.session_state: st.session_state['wm_locked'] = False
-if 'wm_scale' not in st.session_state: st.session_state['wm_scale'] = 1.0
 if 'wm_key' not in st.session_state: st.session_state['wm_key'] = "wm_init"
-if 'wm_bg_json' not in st.session_state: st.session_state['wm_bg_json'] = None
 if 'watermark_result' not in st.session_state: st.session_state['watermark_result'] = None
-if 'wm_objects' not in st.session_state: st.session_state['wm_objects'] = []
 
 # === 工具函数 ===
 
@@ -187,35 +183,34 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
             
     return result
 
+# [核心算法] 去水印/Inpainting
 def inpaint_image(img_pil, mask_pil):
-    # 限制处理尺寸，防止内存溢出
-    max_dim = 1200 # 降低处理阈值以适应云端
+    # 限制处理尺寸，防止内存溢出 (云端内存小)
+    max_dim = 1500 
     w, h = img_pil.size
     
     process_img = img_pil
     process_mask = mask_pil
-    is_resized = False
     
+    # 智能降维：如果图太大，先缩小再修，修完再放大看不出太大区别
     if max(w, h) > max_dim:
         ratio = max_dim / max(w, h)
         new_w, new_h = int(w * ratio), int(h * ratio)
         process_img = img_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
         process_mask = mask_pil.resize((new_w, new_h), Image.Resampling.NEAREST)
-        is_resized = True
     
     try:
         img_np = np.array(process_img.convert("RGB"))
         mask_np = np.array(process_mask.convert("L"))
+        
+        # 二值化
         _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
         
+        # 修复
         inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
-        result = Image.fromarray(inpainted_np)
-        
-        # 如果需要，可以将结果放大回原尺寸（可选，但通常没必要，会模糊）
-        # 这里直接返回优化后的尺寸，保证成功率
-        return result
+        return Image.fromarray(inpainted_np)
     except Exception as e:
-        st.error(f"算法处理出错: {e}")
+        st.error(f"处理失败: {e}")
         return img_pil
 
 # === 主界面 ===
@@ -578,187 +573,84 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 魔法去水印 (JSON Payload + Box Selection Only) ---
+# --- Tab 6: 魔法去水印 (Ultimate Stable Version) ---
 with tab6:
     st.header("💧 魔法去水印 (Inpainting)")
-    st.caption("框选需要去除的水印区域，算法会自动填补。")
+    st.caption("画框遮住水印 -> 算法自动填补。")
     
-    watermark_file = st.file_uploader("上传需要去水印的图片", type=['png','jpg','jpeg','webp'], key="wm_up")
+    wm_file = st.file_uploader("上传图片", type=['png','jpg','jpeg'], key="wm_up")
     
-    # 状态管理
-    if watermark_file and ('wm_filename' not in st.session_state or st.session_state.wm_filename != watermark_file.name):
-        st.session_state.wm_filename = watermark_file.name
-        st.session_state.wm_locked = False
-        st.session_state.wm_scale = 1.0
-        st.session_state.wm_key = str(uuid.uuid4())
-        st.session_state.wm_bg_json = None
-        st.session_state.watermark_result = None
-        st.session_state.wm_objects = [] # 存储框
-
-    if watermark_file:
-        original_img = clean_image(watermark_file)
-        w, h = original_img.size
+    if wm_file:
+        if 'wm_filename' not in st.session_state or st.session_state.wm_filename != wm_file.name:
+            st.session_state.wm_filename = wm_file.name
+            st.session_state.wm_key = str(uuid.uuid4())
+            st.session_state.watermark_result = None
+            
+        orig_img = clean_image(wm_file)
         
-        if not st.session_state.wm_locked:
-            st.info("👇 **第一步：调整图片大小**")
-            default_zoom = 50 if w > 800 else 100
-            wm_zoom = st.slider("🔍 显示缩放 (%)", 10, 100, default_zoom, key="wm_zoom_slider")
+        # 1. 强制缩小预览图 (宽 700px)，保证前端极度丝滑
+        display_width = 700
+        ratio = display_width / orig_img.width
+        display_height = int(orig_img.height * ratio)
+        
+        # 2. 生成预览用的小图 (内存中)
+        preview_img = orig_img.resize((display_width, display_height))
+        
+        # 3. 画布交互 (用 st_canvas 显示小图作为背景)
+        # 注意：这里我们使用 background_image 方式，因为它对小图支持最稳
+        # 为了防止 Base64 崩溃，我们用临时文件落地
+        preview_img.save("temp_wm_preview.png")
+        
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.info("👆 直接在图上 **画框** 遮住水印")
             
-            scale = wm_zoom / 100.0
-            disp_w = int(w * scale)
-            disp_h = int(h * scale)
+            canvas_result = st_canvas(
+                fill_color="rgba(255, 0, 0, 0.4)", # 红色半透明
+                stroke_color="#FF0000",
+                stroke_width=2,
+                background_image=Image.open("temp_wm_preview.png"), # 读小图
+                update_streamlit=True,
+                height=display_height,
+                width=display_width,
+                drawing_mode="rect", # 只允许框选，最快
+                key=f"wm_canvas_{st.session_state.wm_key}",
+                display_toolbar=True
+            )
             
-            preview_img = original_img.resize((disp_w, disp_h))
-            # 强制指定 width
-            st.image(preview_img, width=disp_w, caption=f"预览效果 ({disp_w} x {disp_h})")
-            
-            st.write("---")
-            if st.button("🔒 大小合适了，开始去水印", type="primary"):
-                st.session_state.wm_locked = True
-                st.session_state.wm_scale = scale
+            if st.button("🗑️ 清除选区"):
                 st.session_state.wm_key = str(uuid.uuid4())
-                
-                # [关键修复] JSON 嵌入背景，解决 Bad message format
-                img_b64 = image_to_base64(preview_img)
-                bg_json = {
-                    "version": "4.4.0",
-                    "objects": [{
-                        "type": "image", "version": "4.4.0", "originX": "left", "originY": "top", "left": 0, "top": 0,
-                        "width": disp_w, "height": disp_h, "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
-                        "scaleX": 1, "scaleY": 1, "opacity": 1, "visible": True, "backgroundColor": "",
-                        "src": img_b64, "selectable": False, "evented": False
-                    }]
-                }
-                st.session_state.wm_bg_json = bg_json
                 st.rerun()
-                
-        else:
-            # === 第二步：框选 ===
-            c_tools, c_canvas = st.columns([1, 2])
+
+        with c2:
+            st.write("### 操作")
+            if st.button("🪄 开始消除", type="primary"):
+                if canvas_result.json_data and len(canvas_result.json_data["objects"]) > 0:
+                    with st.spinner("正在高清修复中..."):
+                        # 1. 创建全尺寸蒙版 (黑底)
+                        full_mask = Image.new("L", orig_img.size, 0)
+                        draw = ImageDraw.Draw(full_mask)
+                        
+                        # 2. 将画布上的框 (小坐标) 映射回原图 (大坐标)
+                        # scale = 1 / ratio
+                        scale = 1.0 / ratio
+                        
+                        for obj in canvas_result.json_data["objects"]:
+                            if obj["type"] == "rect":
+                                x = int(obj["left"] * scale)
+                                y = int(obj["top"] * scale)
+                                w = int(obj["width"] * scale * obj.get("scaleX", 1))
+                                h = int(obj["height"] * scale * obj.get("scaleY", 1))
+                                # 在蒙版上画白框
+                                draw.rectangle([x, y, x+w, y+h], fill=255)
+                        
+                        # 3. 调用核心算法 (自带防爆内存机制)
+                        res = inpaint_image(orig_img, full_mask)
+                        st.session_state.watermark_result = res
+                else:
+                    st.warning("请先画个框！")
             
-            with c_tools:
-                st.success("✅ 请在右侧框选")
-                
-                draw_mode = st.radio("模式", ["🔳 框选消除", "✋ 调整选区"], horizontal=False)
-                
-                # 切换模式刷新
-                if draw_mode != st.session_state.get('last_wm_mode'):
-                    st.session_state['last_wm_mode'] = draw_mode
-                    st.session_state.wm_key = str(uuid.uuid4())
-                    st.rerun()
-
-                st.write("---")
-                if st.button("↩️ 撤销选区", use_container_width=True):
-                    if st.session_state.wm_objects:
-                        st.session_state.wm_objects.pop()
-                        st.session_state.wm_key = str(uuid.uuid4())
-                        st.rerun()
-                
-                if st.button("🗑️ 清空选区", use_container_width=True):
-                    st.session_state.wm_objects = []
-                    st.session_state.wm_key = str(uuid.uuid4())
-                    st.rerun()
-
-                st.write("---")
-                if st.button("🔄 解锁重置", use_container_width=True):
-                    st.session_state.wm_locked = False
-                    st.rerun()
-                    
-                st.divider()
-                if st.button("🪄 开始消除", type="primary", use_container_width=True):
-                    st.session_state['trigger_inpaint'] = True
-            
-            with c_canvas:
-                if st.session_state.wm_bg_json is None:
-                    st.error("状态丢失")
-                    st.stop()
-                    
-                bg_w = st.session_state.wm_bg_json['objects'][0]['width']
-                bg_h = st.session_state.wm_bg_json['objects'][0]['height']
-                
-                # [关键逻辑] 只通过 JSON 传递框框，不回传像素数据
-                current_drawing = {
-                    "version": "4.4.0",
-                    "objects": st.session_state.wm_bg_json['objects'] + st.session_state.wm_objects
-                }
-                
-                real_mode = "rect" if "框选" in draw_mode else "transform"
-                
-                canvas_wm = st_canvas(
-                    fill_color="rgba(255, 0, 0, 0.4)",
-                    stroke_color="#FF0000",
-                    stroke_width=2,
-                    background_image=None, # 不传这个
-                    initial_drawing=current_drawing, # 传这个
-                    update_streamlit=True,
-                    height=bg_h,
-                    width=bg_w,
-                    drawing_mode=real_mode,
-                    key=f"wm_canvas_{st.session_state.wm_key}",
-                    display_toolbar=True
-                )
-                
-                # 同步数据
-                if canvas_wm.json_data is not None:
-                    # 过滤掉背景 (image)
-                    rects = [obj for obj in canvas_wm.json_data["objects"] if obj["type"] == "rect"]
-                    if rects != st.session_state.wm_objects:
-                        st.session_state.wm_objects = rects
-
-                # 执行处理 (纯计算逻辑)
-                if st.session_state.get('trigger_inpaint', False):
-                    st.session_state['trigger_inpaint'] = False
-                    
-                    if len(st.session_state.wm_objects) > 0:
-                        with st.spinner("正在智能计算..."):
-                            # 1. 构造蒙版图像 (黑底白框)
-                            # 使用原图尺寸 (可能被缩小过以适应内存)
-                            # 为了防内存溢出，我们先对原图做个限制
-                            process_img = original_img
-                            max_dim = 1200
-                            if max(process_img.width, process_img.height) > max_dim:
-                                ratio = max_dim / max(process_img.width, process_img.height)
-                                process_img = process_img.resize((int(process_img.width*ratio), int(process_img.height*ratio)))
-                            
-                            mask_pil = Image.new("L", process_img.size, 0)
-                            draw = ImageDraw.Draw(mask_pil)
-                            
-                            # 计算缩放比例： 画布 -> 处理图
-                            # 画布是 w*scale, 处理图是 w*ratio (如果有ratio)
-                            # 实际上： canvas_scale = st.session_state.wm_scale
-                            # real_x = canvas_x / canvas_scale
-                            
-                            final_scale_w = process_img.width / bg_w
-                            final_scale_h = process_img.height / bg_h
-                            
-                            for obj in st.session_state.wm_objects:
-                                rx = int(obj["left"] * final_scale_w)
-                                ry = int(obj["top"] * final_scale_h)
-                                rw = int((obj["width"] * obj.get("scaleX", 1)) * final_scale_w)
-                                rh = int((obj["height"] * obj.get("scaleY", 1)) * final_scale_h)
-                                
-                                draw.rectangle([rx, ry, rx+rw, ry+rh], fill=255)
-                            
-                            # 2. 调用 OpenCV 修复
-                            restored = inpaint_image(process_img, mask_pil)
-                            st.session_state['watermark_result'] = restored
-                            st.rerun()
-                    else:
-                        st.warning("请先框选区域")
-
-            # 结果展示
-            if st.session_state['watermark_result']:
-                st.divider()
-                st.success("✨ 处理完成！")
-                res_img = st.session_state['watermark_result']
-                
-                # 对比显示
-                disp_res = res_img.resize((bg_w, bg_h))
-                disp_orig = original_img.resize((bg_w, bg_h))
-                
-                image_comparison(
-                    img1=disp_orig, img2=disp_res, label1="原图", label2="去水印后",
-                    width=bg_w, show_labels=True, in_memory=True
-                )
-                
-                st.download_button("📥 下载处理后的图片", convert_image_to_bytes(res_img), "watermark_removed.png", "image/png", type="primary")
+            if st.session_state.watermark_result:
+                st.success("完成！")
+                st.image(st.session_state.watermark_result, use_column_width=True, caption="修复结果")
+                st.download_button("📥 下载结果", convert_image_to_bytes(st.session_state.watermark_result), "clean.png", "image/png", type="primary")
