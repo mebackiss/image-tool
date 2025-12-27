@@ -48,7 +48,6 @@ if 'wm_scale' not in st.session_state: st.session_state['wm_scale'] = 1.0
 if 'wm_key' not in st.session_state: st.session_state['wm_key'] = "wm_init"
 if 'wm_bg_json' not in st.session_state: st.session_state['wm_bg_json'] = None
 if 'watermark_result' not in st.session_state: st.session_state['watermark_result'] = None
-# 用来存储去水印的框
 if 'wm_rects' not in st.session_state: st.session_state['wm_rects'] = []
 
 # === 工具函数 ===
@@ -188,13 +187,40 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
             
     return result
 
+# [核心优化] 防内存溢出修复版
 def inpaint_image(img_pil, mask_pil):
-    img_np = np.array(img_pil.convert("RGB"))
-    mask_resized = mask_pil.resize(img_pil.size)
-    mask_np = np.array(mask_resized.convert("L"))
-    _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
-    inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
-    return Image.fromarray(inpainted_np)
+    # 限制处理尺寸：如果长边超过 1920px，则缩小处理
+    # 这样能保证云端 1GB 内存不崩溃
+    max_dim = 1920
+    w, h = img_pil.size
+    
+    is_resized = False
+    
+    if max(w, h) > max_dim:
+        ratio = max_dim / max(w, h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        img_pil = img_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        mask_pil = mask_pil.resize((new_w, new_h), Image.Resampling.NEAREST) # Mask用最近邻插值
+        is_resized = True
+    
+    try:
+        img_np = np.array(img_pil.convert("RGB"))
+        mask_np = np.array(mask_pil.convert("L"))
+        
+        _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
+        
+        # 使用 Telea 算法，半径设为 3
+        inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
+        result = Image.fromarray(inpainted_np)
+        
+        # 如果缩放过，可以选择是否要放大回去 (这里直接返回处理后的图，保证速度)
+        if is_resized:
+            st.toast("⚠️ 为了防止内存溢出，图片已自动调整大小处理", icon="ℹ️")
+            
+        return result
+    except Exception as e:
+        st.error(f"处理出错: {e}")
+        return img_pil
 
 # === 主界面 ===
 st.title("🛠️ 全能图片工具箱 Pro Max")
@@ -371,6 +397,7 @@ with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
+    # 切换图片时重置
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
@@ -405,10 +432,15 @@ with tab4:
                     "version": "4.4.0",
                     "objects": [
                         {
-                            "type": "image", "version": "4.4.0", "originX": "left", "originY": "top", "left": 0, "top": 0,
-                            "width": display_w, "height": display_h, "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
-                            "scaleX": 1, "scaleY": 1, "opacity": 1, "visible": True, "backgroundColor": "",
-                            "src": img_b64, "selectable": False, "evented": False
+                            "type": "image",
+                            "version": "4.4.0",
+                            "originX": "left", "originY": "top", "left": 0, "top": 0,
+                            "width": display_w, "height": display_h,
+                            "fill": "rgb(0,0,0)", "stroke": None, "strokeWidth": 0,
+                            "scaleX": 1, "scaleY": 1,
+                            "opacity": 1, "visible": True, "backgroundColor": "",
+                            "src": img_b64,
+                            "selectable": False, "evented": False
                         }
                     ]
                 }
@@ -421,13 +453,6 @@ with tab4:
             with c_tools:
                 st.success("✅ 画板已就绪")
                 draw_mode = st.radio("操作模式", ["✏️ 画框模式", "✋ 调整模式"], horizontal=False)
-                
-                # 模式切换自动刷新key
-                if draw_mode != st.session_state.get('last_draw_mode_tab4'):
-                    st.session_state['last_draw_mode_tab4'] = draw_mode
-                    st.session_state['canvas_key'] = str(uuid.uuid4())
-                    st.rerun()
-
                 st.write("---")
                 if st.button("↩️ 撤销上一步", use_container_width=True):
                     if st.session_state['saved_rects']:
