@@ -3,3 +3,5 @@ pillow
 streamlit-image-coordinates
 streamlit-image-comparison
 streamlit-drawable-canvas
+opencv-python-headless
+numpy
