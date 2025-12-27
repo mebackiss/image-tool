@@ -188,9 +188,13 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
 
 def inpaint_image(img_pil, mask_pil):
     img_np = np.array(img_pil)
+    # 调整蒙版大小以匹配原图
     mask_resized = mask_pil.resize(img_pil.size)
+    # 转为灰度
     mask_np = np.array(mask_resized.convert("L"))
+    # 二值化，确保非黑即白
     _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
+    # 修复
     inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
     return Image.fromarray(inpainted_np)
 
@@ -364,11 +368,12 @@ with tab3:
             dw, dh = int(res.width*z), int(res.height*z)
             image_comparison(img1=img.resize((dw,dh)), img2=res.resize((dw,dh)), label1="原图", label2="修复", width=dw, show_labels=True, in_memory=True)
 
-# --- Tab 4: 自由框选切割 ---
+# --- Tab 4: 自由框选切割 (JSON Background Fix) ---
 with tab4:
     st.header("🔳 自由框选切割 (Free Crop)")
     crop_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg', 'webp'], key="crop_uploader")
     
+    # 切换图片时重置
     if crop_file and ('crop_filename' not in st.session_state or st.session_state.crop_filename != crop_file.name):
         st.session_state['crop_filename'] = crop_file.name
         st.session_state['canvas_locked'] = False
@@ -398,6 +403,7 @@ with tab4:
                 st.session_state['locked_scale'] = scale_factor
                 st.session_state['canvas_key'] = str(uuid.uuid4())
                 
+                # 创建背景对象
                 img_b64 = image_to_base64(preview_img)
                 bg_json = {
                     "version": "4.4.0",
@@ -553,28 +559,27 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 魔法去水印 (Base64 + 双模式) ---
+# --- Tab 6: 魔法去水印 (Stable & Resized) ---
 with tab6:
     st.header("💧 魔法去水印 (Inpainting)")
+    st.caption("使用画笔涂抹或画框，去除区域内容。")
     
     watermark_file = st.file_uploader("上传需要去水印的图片", type=['png','jpg','jpeg','webp'], key="wm_up")
     
-    # 切换图片时重置
-    if watermark_file and ('wm_filename' not in st.session_state or st.session_state.wm_filename != watermark_file.name):
-        st.session_state.wm_filename = watermark_file.name
-        st.session_state.wm_locked = False
-        st.session_state.wm_scale = 1.0
-        st.session_state.wm_key = str(uuid.uuid4())
-        st.session_state.wm_bg_json = None
-        st.session_state.watermark_result = None
-
     if watermark_file:
+        if 'wm_filename' not in st.session_state or st.session_state.wm_filename != watermark_file.name:
+            st.session_state.wm_filename = watermark_file.name
+            st.session_state.wm_locked = False
+            st.session_state.wm_scale = 1.0
+            st.session_state.wm_key = str(uuid.uuid4())
+            st.session_state.wm_bg_json = None
+            st.session_state.watermark_result = None
+
         original_img = clean_image(watermark_file)
         w, h = original_img.size
         
-        # 1. 锁定阶段：先缩放
         if not st.session_state.wm_locked:
-            st.info("👇 **第一步：调整图片显示大小，避免卡顿**")
+            st.info("👇 **第一步：调整大小，确保操作流畅**")
             default_zoom = 50 if w > 800 else 100
             wm_zoom = st.slider("🔍 显示缩放 (%)", 10, 100, default_zoom, key="wm_zoom_slider")
             
@@ -591,7 +596,7 @@ with tab6:
                 st.session_state.wm_scale = scale
                 st.session_state.wm_key = str(uuid.uuid4())
                 
-                # 生成背景 JSON
+                # [关键修复] 使用 Base64 JSON 背景，和 Tab 4 逻辑一致
                 img_b64 = image_to_base64(preview_img)
                 bg_json = {
                     "version": "4.4.0",
@@ -605,12 +610,10 @@ with tab6:
                 st.session_state.wm_bg_json = bg_json
                 st.rerun()
                 
-        # 2. 操作阶段：画笔或框选
         else:
             c_tools, c_canvas = st.columns([1, 2])
             
             with c_tools:
-                # 模式选择
                 mode = st.radio("模式选择", ["🖌️ 画笔涂抹", "🔳 框选消除"])
                 draw_mode = "freedraw" if "画笔" in mode else "rect"
                 
@@ -618,15 +621,19 @@ with tab6:
                 if draw_mode == "freedraw":
                     stroke_width = st.slider("画笔大小", 1, 50, 15)
                 
+                st.write("---")
+                # [关键修复] 在切换模式时，强制更新 Key，防止组件不响应
+                current_mode_key = f"wm_canvas_{st.session_state.wm_key}_{draw_mode}"
+                
                 if st.button("🔄 重新调整大小", use_container_width=True):
                     st.session_state.wm_locked = False
                     st.rerun()
                     
                 st.divider()
                 
-                # 执行去水印
+                # 触发按钮
                 if st.button("🪄 开始魔法消除", type="primary", use_container_width=True):
-                    st.session_state['trigger_inpaint'] = True # 标记触发
+                    st.session_state['trigger_inpaint'] = True
             
             with c_canvas:
                 if st.session_state.wm_bg_json is None:
@@ -636,7 +643,6 @@ with tab6:
                 bg_w = st.session_state.wm_bg_json['objects'][0]['width']
                 bg_h = st.session_state.wm_bg_json['objects'][0]['height']
                 
-                # 使用半透明红色
                 fill_color = "rgba(255, 0, 0, 0.3)" if draw_mode == "rect" else "rgba(255, 0, 0, 0.5)"
                 
                 canvas_wm = st_canvas(
@@ -649,50 +655,36 @@ with tab6:
                     height=bg_h,
                     width=bg_w,
                     drawing_mode=draw_mode,
-                    key=f"wm_canvas_{st.session_state.wm_key}",
+                    key=current_mode_key, # 动态Key确保模式切换生效
                     display_toolbar=True
                 )
                 
-                # 触发处理
+                # 结果处理
                 if st.session_state.get('trigger_inpaint', False):
                     if canvas_wm.image_data is not None:
-                        with st.spinner("正在计算周边像素并填补..."):
-                            st.session_state['trigger_inpaint'] = False # 重置触发器
+                        with st.spinner("正在计算..."):
+                            st.session_state['trigger_inpaint'] = False
                             
-                            # 获取蒙版 (RGBA) -> 转灰度
                             mask_data = canvas_wm.image_data
                             mask_pil = Image.fromarray(mask_data.astype('uint8'), 'RGBA')
                             
-                            # 核心：修复高清原图
-                            # 传入原图和当前的小蒙版，算法内部会自动把蒙版放大匹配原图
                             restored = inpaint_image(original_img, mask_pil)
                             st.session_state['watermark_result'] = restored
-                            
-            # 3. 结果展示
+                            st.rerun() # 刷新显示结果
+
+            # 结果展示
             if st.session_state['watermark_result']:
                 st.divider()
                 st.success("✨ 处理完成！")
                 res_img = st.session_state['watermark_result']
                 
-                # 为了对比显示，缩放结果图
+                # 对比显示
                 disp_res = res_img.resize((bg_w, bg_h))
-                # 原始预览图
                 disp_orig = original_img.resize((bg_w, bg_h))
                 
                 image_comparison(
-                    img1=disp_orig,
-                    img2=disp_res,
-                    label1="原图",
-                    label2="去水印后",
-                    width=bg_w,
-                    show_labels=True,
-                    in_memory=True
+                    img1=disp_orig, img2=disp_res, label1="原图", label2="去水印后",
+                    width=bg_w, show_labels=True, in_memory=True
                 )
                 
-                st.download_button(
-                    label="📥 下载处理后的高清大图",
-                    data=convert_image_to_bytes(res_img),
-                    file_name="watermark_removed.png",
-                    mime="image/png",
-                    type="primary"
-                )
+                st.download_button("📥 下载处理后的高清大图", convert_image_to_bytes(res_img), "watermark_removed.png", "image/png", type="primary")
