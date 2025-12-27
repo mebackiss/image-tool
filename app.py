@@ -48,7 +48,7 @@ if 'wm_scale' not in st.session_state: st.session_state['wm_scale'] = 1.0
 if 'wm_key' not in st.session_state: st.session_state['wm_key'] = "wm_init"
 if 'wm_bg_json' not in st.session_state: st.session_state['wm_bg_json'] = None
 if 'watermark_result' not in st.session_state: st.session_state['watermark_result'] = None
-if 'wm_rects' not in st.session_state: st.session_state['wm_rects'] = []
+if 'wm_objects' not in st.session_state: st.session_state['wm_objects'] = []
 
 # === 工具函数 ===
 
@@ -187,39 +187,35 @@ def stitch_images_advanced(images_data, mode='vertical', alignment='max', cols=2
             
     return result
 
-# [核心优化] 防内存溢出修复版
 def inpaint_image(img_pil, mask_pil):
-    # 限制处理尺寸：如果长边超过 1920px，则缩小处理
-    # 这样能保证云端 1GB 内存不崩溃
-    max_dim = 1920
+    # 限制处理尺寸，防止内存溢出
+    max_dim = 1200 # 降低处理阈值以适应云端
     w, h = img_pil.size
     
+    process_img = img_pil
+    process_mask = mask_pil
     is_resized = False
     
     if max(w, h) > max_dim:
         ratio = max_dim / max(w, h)
         new_w, new_h = int(w * ratio), int(h * ratio)
-        img_pil = img_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        mask_pil = mask_pil.resize((new_w, new_h), Image.Resampling.NEAREST) # Mask用最近邻插值
+        process_img = img_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        process_mask = mask_pil.resize((new_w, new_h), Image.Resampling.NEAREST)
         is_resized = True
     
     try:
-        img_np = np.array(img_pil.convert("RGB"))
-        mask_np = np.array(mask_pil.convert("L"))
-        
+        img_np = np.array(process_img.convert("RGB"))
+        mask_np = np.array(process_mask.convert("L"))
         _, mask_thresh = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
         
-        # 使用 Telea 算法，半径设为 3
         inpainted_np = cv2.inpaint(img_np, mask_thresh, 3, cv2.INPAINT_TELEA)
         result = Image.fromarray(inpainted_np)
         
-        # 如果缩放过，可以选择是否要放大回去 (这里直接返回处理后的图，保证速度)
-        if is_resized:
-            st.toast("⚠️ 为了防止内存溢出，图片已自动调整大小处理", icon="ℹ️")
-            
+        # 如果需要，可以将结果放大回原尺寸（可选，但通常没必要，会模糊）
+        # 这里直接返回优化后的尺寸，保证成功率
         return result
     except Exception as e:
-        st.error(f"处理出错: {e}")
+        st.error(f"算法处理出错: {e}")
         return img_pil
 
 # === 主界面 ===
@@ -582,7 +578,7 @@ with tab5:
                 result_image.save(buf, format="PNG")
                 st.download_button("📥 下载设计图", data=buf.getvalue(), file_name="my_design.png", mime="image/png", type="primary")
 
-# --- Tab 6: 魔法去水印 (Fixed - Box Selection Only) ---
+# --- Tab 6: 魔法去水印 (JSON Payload + Box Selection Only) ---
 with tab6:
     st.header("💧 魔法去水印 (Inpainting)")
     st.caption("框选需要去除的水印区域，算法会自动填补。")
@@ -597,7 +593,7 @@ with tab6:
         st.session_state.wm_key = str(uuid.uuid4())
         st.session_state.wm_bg_json = None
         st.session_state.watermark_result = None
-        st.session_state.wm_rects = [] # 存储框
+        st.session_state.wm_objects = [] # 存储框
 
     if watermark_file:
         original_img = clean_image(watermark_file)
@@ -622,7 +618,7 @@ with tab6:
                 st.session_state.wm_scale = scale
                 st.session_state.wm_key = str(uuid.uuid4())
                 
-                # 使用 JSON Base64 背景 (解决白屏)
+                # [关键修复] JSON 嵌入背景，解决 Bad message format
                 img_b64 = image_to_base64(preview_img)
                 bg_json = {
                     "version": "4.4.0",
@@ -653,13 +649,13 @@ with tab6:
 
                 st.write("---")
                 if st.button("↩️ 撤销选区", use_container_width=True):
-                    if st.session_state.wm_rects:
-                        st.session_state.wm_rects.pop()
+                    if st.session_state.wm_objects:
+                        st.session_state.wm_objects.pop()
                         st.session_state.wm_key = str(uuid.uuid4())
                         st.rerun()
                 
                 if st.button("🗑️ 清空选区", use_container_width=True):
-                    st.session_state.wm_rects = []
+                    st.session_state.wm_objects = []
                     st.session_state.wm_key = str(uuid.uuid4())
                     st.rerun()
 
@@ -680,10 +676,10 @@ with tab6:
                 bg_w = st.session_state.wm_bg_json['objects'][0]['width']
                 bg_h = st.session_state.wm_bg_json['objects'][0]['height']
                 
-                # 组合 Drawing
+                # [关键逻辑] 只通过 JSON 传递框框，不回传像素数据
                 current_drawing = {
                     "version": "4.4.0",
-                    "objects": st.session_state.wm_bg_json['objects'] + st.session_state.wm_rects
+                    "objects": st.session_state.wm_bg_json['objects'] + st.session_state.wm_objects
                 }
                 
                 real_mode = "rect" if "框选" in draw_mode else "transform"
@@ -692,8 +688,8 @@ with tab6:
                     fill_color="rgba(255, 0, 0, 0.4)",
                     stroke_color="#FF0000",
                     stroke_width=2,
-                    background_image=None, # 不传这个参数
-                    initial_drawing=current_drawing, # 用 JSON
+                    background_image=None, # 不传这个
+                    initial_drawing=current_drawing, # 传这个
                     update_streamlit=True,
                     height=bg_h,
                     width=bg_w,
@@ -706,33 +702,45 @@ with tab6:
                 if canvas_wm.json_data is not None:
                     # 过滤掉背景 (image)
                     rects = [obj for obj in canvas_wm.json_data["objects"] if obj["type"] == "rect"]
-                    if rects != st.session_state.wm_rects:
-                        st.session_state.wm_rects = rects
+                    if rects != st.session_state.wm_objects:
+                        st.session_state.wm_objects = rects
 
-                # 执行处理
+                # 执行处理 (纯计算逻辑)
                 if st.session_state.get('trigger_inpaint', False):
                     st.session_state['trigger_inpaint'] = False
                     
-                    if len(st.session_state.wm_rects) > 0:
+                    if len(st.session_state.wm_objects) > 0:
                         with st.spinner("正在智能计算..."):
                             # 1. 构造蒙版图像 (黑底白框)
-                            # 使用原图尺寸
-                            mask_pil = Image.new("L", original_img.size, 0)
+                            # 使用原图尺寸 (可能被缩小过以适应内存)
+                            # 为了防内存溢出，我们先对原图做个限制
+                            process_img = original_img
+                            max_dim = 1200
+                            if max(process_img.width, process_img.height) > max_dim:
+                                ratio = max_dim / max(process_img.width, process_img.height)
+                                process_img = process_img.resize((int(process_img.width*ratio), int(process_img.height*ratio)))
+                            
+                            mask_pil = Image.new("L", process_img.size, 0)
                             draw = ImageDraw.Draw(mask_pil)
                             
-                            scale = st.session_state.wm_scale
+                            # 计算缩放比例： 画布 -> 处理图
+                            # 画布是 w*scale, 处理图是 w*ratio (如果有ratio)
+                            # 实际上： canvas_scale = st.session_state.wm_scale
+                            # real_x = canvas_x / canvas_scale
                             
-                            for obj in st.session_state.wm_rects:
-                                # 坐标还原到原图
-                                rx = int(obj["left"] / scale)
-                                ry = int(obj["top"] / scale)
-                                rw = int((obj["width"] * obj.get("scaleX", 1)) / scale)
-                                rh = int((obj["height"] * obj.get("scaleY", 1)) / scale)
+                            final_scale_w = process_img.width / bg_w
+                            final_scale_h = process_img.height / bg_h
+                            
+                            for obj in st.session_state.wm_objects:
+                                rx = int(obj["left"] * final_scale_w)
+                                ry = int(obj["top"] * final_scale_h)
+                                rw = int((obj["width"] * obj.get("scaleX", 1)) * final_scale_w)
+                                rh = int((obj["height"] * obj.get("scaleY", 1)) * final_scale_h)
                                 
                                 draw.rectangle([rx, ry, rx+rw, ry+rh], fill=255)
                             
                             # 2. 调用 OpenCV 修复
-                            restored = inpaint_image(original_img, mask_pil)
+                            restored = inpaint_image(process_img, mask_pil)
                             st.session_state['watermark_result'] = restored
                             st.rerun()
                     else:
